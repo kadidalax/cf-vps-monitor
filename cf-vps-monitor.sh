@@ -106,57 +106,111 @@ log() {
 
 # 获取CPU使用率
 get_cpu_usage() {
-    cpu_usage=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\\([0-9.]*\\)%* id.*/\\1/" | awk '{print 100 - $1}')
-    cpu_load=$(cat /proc/loadavg | awk '{print $1","$2","$3}')
-    echo "{\"usage_percent\":$cpu_usage,\"load_avg\":[$cpu_load]}"
+    cpu_usage=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\\([0-9.]*\\)%* id.*/\\1/" | awk '{print 100 - $1}' || echo "0")
+    cpu_load=$(cat /proc/loadavg | awk '{print "["$1","$2","$3"]"}' || echo "[0,0,0]")
+    # 验证 JSON
+    json="{\"usage_percent\":$cpu_usage,\"load_avg\":$cpu_load}"
+    if echo "$json" | jq . >/dev/null 2>&1; then
+        echo "$json"
+    else
+        log "Invalid CPU JSON: $json"
+        echo "{\"usage_percent\":0,\"load_avg\":[0,0,0]}"
+    fi
 }
 
 # 获取内存使用情况
 get_memory_usage() {
-    total=$(free -k | grep Mem | awk '{print $2}')
-    used=$(free -k | grep Mem | awk '{print $3}')
-    free=$(free -k | grep Mem | awk '{print $4}')
-    usage_percent=$(echo "scale=1; $used * 100 / $total" | bc)
-    echo "{\"total\":$total,\"used\":$used,\"free\":$free,\"usage_percent\":$usage_percent}"
+    mem_info=$(free -k | grep Mem || echo "0 0 0")
+    total=$(echo "$mem_info" | awk '{print $2}' || echo "0")
+    used=$(echo "$mem_info" | awk '{print $3}' || echo "0")
+    free=$(echo "$mem_info" | awk '{print $4}' || echo "0")
+    usage_percent=$(echo "scale=1; $used * 100 / ($total + 0.1)" | bc || echo "0")
+    json="{\"total\":$total,\"used\":$used,\"free\":$free,\"usage_percent\":$usage_percent}"
+    if echo "$json" | jq . >/dev/null 2>&1; then
+        echo "$json"
+    else
+        log "Invalid Memory JSON: $json"
+        echo "{\"total\":0,\"used\":0,\"free\":0,\"usage_percent\":0}"
+    fi
 }
 
 # 获取硬盘使用情况
 get_disk_usage() {
-    disk_info=$(df -k / | tail -1)
-    total=$(echo "$disk_info" | awk '{print $2 / 1024 / 1024}')
-    used=$(echo "$disk_info" | awk '{print $3 / 1024 / 1024}')
-    free=$(echo "$disk_info" | awk '{print $4 / 1024 / 1024}')
-    usage_percent=$(echo "$disk_info" | awk '{print $5}' | tr -d '%')
-    echo "{\"total\":$total,\"used\":$used,\"free\":$free,\"usage_percent\":$usage_percent}"
+    disk_info=$(df -k / | tail -1 || echo "0 0 0 0 0%")
+    total=$(echo "$disk_info" | awk '{print $2 / 1024 / 1024}' || echo "0")
+    used=$(echo "$disk_info" | awk '{print $3 / 1024 / 1024}' || echo "0")
+    free=$(echo "$disk_info" | awk '{print $4 / 1024 / 1024}' || echo "0")
+    usage_percent=$(echo "$disk_info" | awk '{print $5}' | tr -d '%' || echo "0")
+    json="{\"total\":$total,\"used\":$used,\"free\":$free,\"usage_percent\":$usage_percent}"
+    if echo "$json" | jq . >/dev/null 2>&1; then
+        echo "$json"
+    else
+        log "Invalid Disk JSON: $json"
+        echo "{\"total\":0,\"used\":0,\"free\":0,\"usage_percent\":0}"
+    fi
 }
 
 # 获取网络使用情况
 get_network_usage() {
-    # 检查是否安装了ifstat
     if ! command -v ifstat &> /dev/null; then
         log "ifstat未安装，无法获取网络速度"
         echo "{\"upload_speed\":0,\"download_speed\":0,\"total_upload\":0,\"total_download\":0}"
         return
     fi
     
-    # 获取网络接口
-    interface=$(ip route | grep default | awk '{print $5}')
+    # 尝试多种方式获取网络接口
+    interface=$(ip -o -4 route show to default 2>/dev/null | awk '{print $5}' | head -n 1 || echo "")
     
-    # 获取网络速度（KB/s）
-    network_speed=$(ifstat -i "$interface" 1 1 | tail -1)
-    download_speed=$(echo "$network_speed" | awk '{print $1 * 1024}')
-    upload_speed=$(echo "$network_speed" | awk '{print $2 * 1024}')
+    # 如果没有找到默认路由，尝试获取第一个活动非环回接口
+    if [ -z "$interface" ]; then
+        interface=$(ip -o link show up 2>/dev/null | grep -v 'lo:' | awk -F': ' '{print $2}' | head -n 1 || echo "")
+    fi
     
-    # 获取总流量
-    rx_bytes=$(cat /proc/net/dev | grep "$interface" | awk '{print $2}')
-    tx_bytes=$(cat /proc/net/dev | grep "$interface" | awk '{print $10}')
+    # 清理接口名称，移除@if部分
+    interface=$(echo "$interface" | sed 's/@[^[:space:]]*//g')
     
-    echo "{\"upload_speed\":$upload_speed,\"download_speed\":$download_speed,\"total_upload\":$tx_bytes,\"total_download\":$rx_bytes}"
+    if [ -z "$interface" ]; then
+        log "未找到活动网络接口，使用默认值"
+        echo "{\"upload_speed\":0,\"download_speed\":0,\"total_upload\":0,\"total_download\":0}"
+        return
+    fi
+    
+    log "使用网络接口: $interface"
+    
+    ifstat_output=$(ifstat -i "$interface" 1 1 2>/dev/null)
+    if [ -z "$ifstat_output" ] || echo "$ifstat_output" | grep -q "error"; then
+        log "ifstat 失败 for $interface，使用默认值"
+        echo "{\"upload_speed\":0,\"download_speed\":0,\"total_upload\":0,\"total_download\":0}"
+        return
+    fi
+    
+    network_speed=$(echo "$ifstat_output" | tail -n 1)
+    download_speed=$(echo "$network_speed" | awk '{print $1 * 1024}' | grep -o '[0-9.]*' || echo "0")
+    upload_speed=$(echo "$network_speed" | awk '{print $2 * 1024}' | grep -o '[0-9.]*' || echo "0")
+    
+    # 确保这些值是数字
+    if ! [[ "$download_speed" =~ ^[0-9]*(\.[0-9]*)?$ ]]; then download_speed=0; fi
+    if ! [[ "$upload_speed" =~ ^[0-9]*(\.[0-9]*)?$ ]]; then upload_speed=0; fi
+    
+    rx_bytes=$(cat /proc/net/dev 2>/dev/null | grep "$interface" | awk '{print $2}' || echo "0")
+    tx_bytes=$(cat /proc/net/dev 2>/dev/null | grep "$interface" | awk '{print $10}' || echo "0")
+    
+    # 确保这些值是数字
+    if ! [[ "$rx_bytes" =~ ^[0-9]+$ ]]; then rx_bytes=0; fi
+    if ! [[ "$tx_bytes" =~ ^[0-9]+$ ]]; then tx_bytes=0; fi
+    
+    json="{\"upload_speed\":$upload_speed,\"download_speed\":$download_speed,\"total_upload\":$tx_bytes,\"total_download\":$rx_bytes}"
+    if echo "$json" | jq . >/dev/null 2>&1; then
+        echo "$json"
+    else
+        log "Invalid Network JSON: $json"
+        echo "{\"upload_speed\":0,\"download_speed\":0,\"total_upload\":0,\"total_download\":0}"
+    fi
 }
 
 # 获取运行时长
 get_uptime() {
-    uptime_seconds=$(cut -d. -f1 /proc/uptime)
+    uptime_seconds=$(cut -d. -f1 /proc/uptime || echo "0")
     echo "$uptime_seconds"
 }
 
@@ -169,7 +223,60 @@ report_metrics() {
     network=$(get_network_usage)
     uptime=$(get_uptime)
     
-    data="{\"timestamp\":$timestamp,\"cpu\":$cpu,\"memory\":$memory,\"disk\":$disk,\"network\":$network,\"uptime\":$uptime}"
+    # 验证所有数据是否为有效的JSON
+    if ! echo "$cpu" | jq . >/dev/null 2>&1; then
+        log "CPU 数据不是有效的JSON: $cpu"
+        cpu="{\"usage_percent\":0,\"load_avg\":[0,0,0]}"
+    fi
+    
+    if ! echo "$memory" | jq . >/dev/null 2>&1; then
+        log "Memory 数据不是有效的JSON: $memory"
+        memory="{\"total\":0,\"used\":0,\"free\":0,\"usage_percent\":0}"
+    fi
+    
+    if ! echo "$disk" | jq . >/dev/null 2>&1; then
+        log "Disk 数据不是有效的JSON: $disk"
+        disk="{\"total\":0,\"used\":0,\"free\":0,\"usage_percent\":0}"
+    fi
+    
+    if ! echo "$network" | jq . >/dev/null 2>&1; then
+        log "Network 数据不是有效的JSON: $network"
+        network="{\"upload_speed\":0,\"download_speed\":0,\"total_upload\":0,\"total_download\":0}"
+    fi
+    
+    # 确保uptime是数字
+    if ! [[ "$uptime" =~ ^[0-9]+$ ]]; then
+        log "Uptime 不是有效的数字: $uptime"
+        uptime="0"
+    fi
+    
+    log "CPU 数据: $cpu"
+    log "Memory 数据: $memory"
+    log "Disk 数据: $disk"
+    log "Network 数据: $network"
+    log "Uptime: $uptime"
+    
+    # 使用--arg而不是--argjson，在jq内部进行转换
+    data=$(jq -n \
+        --arg timestamp "$timestamp" \
+        --argjson cpu "$cpu" \
+        --argjson memory "$memory" \
+        --argjson disk "$disk" \
+        --argjson network "$network" \
+        --arg uptime "$uptime" \
+        '{"timestamp":($timestamp|tonumber),"cpu":$cpu,"memory":$memory,"disk":$disk,"network":$network,"uptime":($uptime|tonumber)}' 2>/tmp/jq_error.txt)
+    
+    if [ $? -ne 0 ]; then
+        log "jq 错误: $(cat /tmp/jq_error.txt)"
+        return
+    fi
+    
+    log "JSON 数据: $data"
+    
+    if ! echo "$data" | jq . >/dev/null 2>&1; then
+        log "无效 JSON 数据: $data"
+        return
+    fi
     
     log "正在上报数据..."
     
