@@ -158,29 +158,65 @@ get_network_usage() {
         return
     fi
     
-    # 尝试多种方式获取网络接口
-    interface=$(ip -o -4 route show to default 2>/dev/null | awk '{print $5}' | head -n 1 || echo "")
+    # 获取系统上有流量的非环回接口
+    dev_info=$(cat /proc/net/dev 2>/dev/null | grep -v 'lo:' | grep -v ' 0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0' || echo "")
+    log "检测到的网络接口流量信息: $dev_info"
     
-    # 如果没有找到默认路由，尝试获取第一个活动非环回接口
+    # 尝试多种方式获取网络接口
+    interface=""
+    
+    # 方法1: 先查找默认路由
+    default_route_iface=$(ip -o -4 route show to default 2>/dev/null | awk '{print $5}' | head -n 1 || echo "")
+    if [ -n "$default_route_iface" ]; then
+        interface=$default_route_iface
+        log "从默认路由找到接口: $interface"
+    fi
+    
+    # 方法2: 如果没有默认路由，检查eth0接口是否可用
+    if [ -z "$interface" ] && ip link show eth0 2>/dev/null | grep -q "state UP"; then
+        interface="eth0"
+        log "使用eth0接口"
+    fi
+    
+    # 方法3: 如果依然没有找到，尝试使用第一个非环回、非docker的UP接口
     if [ -z "$interface" ]; then
-        interface=$(ip -o link show up 2>/dev/null | grep -v 'lo:' | awk -F': ' '{print $2}' | head -n 1 || echo "")
+        interface=$(ip -o link show up 2>/dev/null | grep -v 'lo:' | grep -v 'docker' | grep 'state UP' | awk -F': ' '{print $2}' | head -n 1 || echo "")
+        log "使用第一个可用的非环回接口: $interface"
+    fi
+    
+    # 方法4: 直接从/proc/net/dev中获取第一个有流量的非环回接口
+    if [ -z "$interface" ]; then
+        interface=$(cat /proc/net/dev 2>/dev/null | grep -v 'lo:' | grep -v 'docker' | grep -v ' 0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0' | head -n 1 | awk -F: '{print $1}' | tr -d ' ' || echo "")
+        log "从/proc/net/dev中找到第一个有流量的接口: $interface"
     fi
     
     # 清理接口名称，移除@if部分
     interface=$(echo "$interface" | sed 's/@[^[:space:]]*//g')
     
     if [ -z "$interface" ]; then
-        log "未找到活动网络接口，使用默认值"
-        echo "{\"upload_speed\":0,\"download_speed\":0,\"total_upload\":0,\"total_download\":0}"
-        return
+        log "未找到活动网络接口，尝试使用eth0"
+        interface="eth0"
     fi
     
-    log "使用网络接口: $interface"
+    log "最终使用网络接口: $interface"
     
     ifstat_output=$(ifstat -i "$interface" 1 1 2>/dev/null)
     if [ -z "$ifstat_output" ] || echo "$ifstat_output" | grep -q "error"; then
-        log "ifstat 失败 for $interface，使用默认值"
-        echo "{\"upload_speed\":0,\"download_speed\":0,\"total_upload\":0,\"total_download\":0}"
+        log "ifstat 失败 for $interface，尝试直接从/proc/net/dev读取"
+        # 从/proc/net/dev直接获取数据
+        rx_bytes_1=$(cat /proc/net/dev 2>/dev/null | grep "$interface:" | awk '{print $2}' || echo "0")
+        tx_bytes_1=$(cat /proc/net/dev 2>/dev/null | grep "$interface:" | awk '{print $10}' || echo "0")
+        sleep 1
+        rx_bytes_2=$(cat /proc/net/dev 2>/dev/null | grep "$interface:" | awk '{print $2}' || echo "0")
+        tx_bytes_2=$(cat /proc/net/dev 2>/dev/null | grep "$interface:" | awk '{print $10}' || echo "0")
+        
+        download_speed=$((rx_bytes_2 - rx_bytes_1))
+        upload_speed=$((tx_bytes_2 - tx_bytes_1))
+        rx_bytes=$rx_bytes_2
+        tx_bytes=$tx_bytes_2
+        
+        json="{\"upload_speed\":$upload_speed,\"download_speed\":$download_speed,\"total_upload\":$tx_bytes,\"total_download\":$rx_bytes}"
+        echo "$json"
         return
     fi
     
