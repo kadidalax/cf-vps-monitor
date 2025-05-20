@@ -92,6 +92,7 @@ create_monitor_script() {
     cat > "$INSTALL_DIR/monitor.sh" << 'EOF'
 #!/bin/bash
 
+# 修改版本 - 2025-05-20
 # 配置
 API_KEY="__API_KEY__"
 SERVER_ID="__SERVER_ID__"
@@ -99,23 +100,23 @@ WORKER_URL="__WORKER_URL__"
 INTERVAL="__INTERVAL__"  # 上报间隔（秒）
 LOG_FILE="/var/log/vps-monitor.log"
 
-# 日志函数
+# 日志函数 - 同时输出到标准错误以便在systemd日志中查看
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+    message="$(date '+%Y-%m-%d %H:%M:%S') - $1"
+    echo "$message" | tee -a "$LOG_FILE" >&2
+}
+
+# 调试函数 - 输出详细调试信息
+debug() {
+    message="$(date '+%Y-%m-%d %H:%M:%S') - DEBUG: $1"
+    echo "$message" | tee -a "$LOG_FILE" >&2
 }
 
 # 获取CPU使用率
 get_cpu_usage() {
     cpu_usage=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\\([0-9.]*\\)%* id.*/\\1/" | awk '{print 100 - $1}' || echo "0")
     cpu_load=$(cat /proc/loadavg | awk '{print "["$1","$2","$3"]"}' || echo "[0,0,0]")
-    # 验证 JSON
-    json="{\"usage_percent\":$cpu_usage,\"load_avg\":$cpu_load}"
-    if echo "$json" | jq . >/dev/null 2>&1; then
-        echo "$json"
-    else
-        log "Invalid CPU JSON: $json"
-        echo "{\"usage_percent\":0,\"load_avg\":[0,0,0]}"
-    fi
+    echo "{\"usage_percent\":$cpu_usage,\"load_avg\":$cpu_load}"
 }
 
 # 获取内存使用情况
@@ -125,13 +126,7 @@ get_memory_usage() {
     used=$(echo "$mem_info" | awk '{print $3}' || echo "0")
     free=$(echo "$mem_info" | awk '{print $4}' || echo "0")
     usage_percent=$(echo "scale=1; $used * 100 / ($total + 0.1)" | bc || echo "0")
-    json="{\"total\":$total,\"used\":$used,\"free\":$free,\"usage_percent\":$usage_percent}"
-    if echo "$json" | jq . >/dev/null 2>&1; then
-        echo "$json"
-    else
-        log "Invalid Memory JSON: $json"
-        echo "{\"total\":0,\"used\":0,\"free\":0,\"usage_percent\":0}"
-    fi
+    echo "{\"total\":$total,\"used\":$used,\"free\":$free,\"usage_percent\":$usage_percent}"
 }
 
 # 获取硬盘使用情况
@@ -141,107 +136,107 @@ get_disk_usage() {
     used=$(echo "$disk_info" | awk '{print $3 / 1024 / 1024}' || echo "0")
     free=$(echo "$disk_info" | awk '{print $4 / 1024 / 1024}' || echo "0")
     usage_percent=$(echo "$disk_info" | awk '{print $5}' | tr -d '%' || echo "0")
-    json="{\"total\":$total,\"used\":$used,\"free\":$free,\"usage_percent\":$usage_percent}"
-    if echo "$json" | jq . >/dev/null 2>&1; then
-        echo "$json"
-    else
-        log "Invalid Disk JSON: $json"
-        echo "{\"total\":0,\"used\":0,\"free\":0,\"usage_percent\":0}"
-    fi
+    echo "{\"total\":$total,\"used\":$used,\"free\":$free,\"usage_percent\":$usage_percent}"
 }
 
 # 获取网络使用情况
 get_network_usage() {
-    if ! command -v ifstat &> /dev/null; then
-        log "ifstat未安装，无法获取网络速度"
-        echo "{\"upload_speed\":0,\"download_speed\":0,\"total_upload\":0,\"total_download\":0}"
+    # 输出网络接口的调试信息
+    debug "可用网络接口列表:"
+    debug "$(cat /proc/net/dev | grep -v "lo:" | grep -v '^[ ]*$')"
+    
+    # 检查是否有eth0接口
+    if grep -q "eth0:" /proc/net/dev 2>/dev/null; then
+        debug "发现eth0接口，开始收集流量数据"
+        
+        # 获取eth0接口数据
+        eth0_line=$(grep "eth0:" /proc/net/dev)
+        debug "eth0接口数据: $eth0_line"
+        
+        # 第一次读取
+        rx_bytes_1=$(echo "$eth0_line" | awk '{print $2}')
+        tx_bytes_1=$(echo "$eth0_line" | awk '{print $10}')
+        debug "第一次读取 - 接收字节: $rx_bytes_1, 发送字节: $tx_bytes_1"
+        
+        # 等待2秒以获取更准确的速度测量
+        sleep 2
+        
+        # 第二次读取
+        eth0_line=$(grep "eth0:" /proc/net/dev)
+        rx_bytes_2=$(echo "$eth0_line" | awk '{print $2}')
+        tx_bytes_2=$(echo "$eth0_line" | awk '{print $10}')
+        debug "第二次读取 - 接收字节: $rx_bytes_2, 发送字节: $tx_bytes_2"
+        
+        # 计算2秒内的速度
+        download_speed=$(( (rx_bytes_2 - rx_bytes_1) / 2 ))
+        upload_speed=$(( (tx_bytes_2 - tx_bytes_1) / 2 ))
+        
+        # 处理可能的负值（计数器重置）
+        if [ "$download_speed" -lt 0 ]; then 
+            debug "接收速度为负值，重置为0"
+            download_speed=0
+        fi
+        if [ "$upload_speed" -lt 0 ]; then 
+            debug "发送速度为负值，重置为0"
+            upload_speed=0
+        fi
+        
+        log "网络速度 - 下载: $download_speed 字节/秒, 上传: $upload_speed 字节/秒"
+        log "总流量 - 下载: $rx_bytes_2 字节, 上传: $tx_bytes_2 字节"
+        
+        # 返回JSON格式的数据
+        echo "{\"upload_speed\":$upload_speed,\"download_speed\":$download_speed,\"total_upload\":$tx_bytes_2,\"total_download\":$rx_bytes_2}"
         return
     fi
     
-    # 获取系统上有流量的非环回接口
-    dev_info=$(cat /proc/net/dev 2>/dev/null | grep -v 'lo:' | grep -v ' 0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0' || echo "")
-    log "检测到的网络接口流量信息: $dev_info"
-    
-    # 尝试多种方式获取网络接口
-    interface=""
-    
-    # 方法1: 先查找默认路由
-    default_route_iface=$(ip -o -4 route show to default 2>/dev/null | awk '{print $5}' | head -n 1 || echo "")
-    if [ -n "$default_route_iface" ]; then
-        interface=$default_route_iface
-        log "从默认路由找到接口: $interface"
-    fi
-    
-    # 方法2: 如果没有默认路由，检查eth0接口是否可用
-    if [ -z "$interface" ] && ip link show eth0 2>/dev/null | grep -q "state UP"; then
-        interface="eth0"
-        log "使用eth0接口"
-    fi
-    
-    # 方法3: 如果依然没有找到，尝试使用第一个非环回、非docker的UP接口
-    if [ -z "$interface" ]; then
-        interface=$(ip -o link show up 2>/dev/null | grep -v 'lo:' | grep -v 'docker' | grep 'state UP' | awk -F': ' '{print $2}' | head -n 1 || echo "")
-        log "使用第一个可用的非环回接口: $interface"
-    fi
-    
-    # 方法4: 直接从/proc/net/dev中获取第一个有流量的非环回接口
-    if [ -z "$interface" ]; then
-        interface=$(cat /proc/net/dev 2>/dev/null | grep -v 'lo:' | grep -v 'docker' | grep -v ' 0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0 *0' | head -n 1 | awk -F: '{print $1}' | tr -d ' ' || echo "")
-        log "从/proc/net/dev中找到第一个有流量的接口: $interface"
-    fi
-    
-    # 清理接口名称，移除@if部分
-    interface=$(echo "$interface" | sed 's/@[^[:space:]]*//g')
-    
-    if [ -z "$interface" ]; then
-        log "未找到活动网络接口，尝试使用eth0"
-        interface="eth0"
-    fi
-    
-    log "最终使用网络接口: $interface"
-    
-    ifstat_output=$(ifstat -i "$interface" 1 1 2>/dev/null)
-    if [ -z "$ifstat_output" ] || echo "$ifstat_output" | grep -q "error"; then
-        log "ifstat 失败 for $interface，尝试直接从/proc/net/dev读取"
-        # 从/proc/net/dev直接获取数据
-        rx_bytes_1=$(cat /proc/net/dev 2>/dev/null | grep "$interface:" | awk '{print $2}' || echo "0")
-        tx_bytes_1=$(cat /proc/net/dev 2>/dev/null | grep "$interface:" | awk '{print $10}' || echo "0")
-        sleep 1
-        rx_bytes_2=$(cat /proc/net/dev 2>/dev/null | grep "$interface:" | awk '{print $2}' || echo "0")
-        tx_bytes_2=$(cat /proc/net/dev 2>/dev/null | grep "$interface:" | awk '{print $10}' || echo "0")
+    # 如果没有eth0，找出第一个非lo接口
+    interface=$(cat /proc/net/dev | grep -v "lo:" | grep -v "docker" | head -n 1 | awk -F: '{print $1}' | tr -d ' ')
+    if [ -n "$interface" ]; then
+        debug "使用备选接口: $interface"
         
-        download_speed=$((rx_bytes_2 - rx_bytes_1))
-        upload_speed=$((tx_bytes_2 - tx_bytes_1))
-        rx_bytes=$rx_bytes_2
-        tx_bytes=$tx_bytes_2
+        # 获取接口数据
+        iface_line=$(grep "$interface:" /proc/net/dev)
+        debug "$interface接口数据: $iface_line"
         
-        json="{\"upload_speed\":$upload_speed,\"download_speed\":$download_speed,\"total_upload\":$tx_bytes,\"total_download\":$rx_bytes}"
-        echo "$json"
+        # 第一次读取
+        rx_bytes_1=$(echo "$iface_line" | awk '{print $2}')
+        tx_bytes_1=$(echo "$iface_line" | awk '{print $10}')
+        debug "第一次读取 - 接收字节: $rx_bytes_1, 发送字节: $tx_bytes_1"
+        
+        # 等待2秒以获取更准确的速度测量
+        sleep 2
+        
+        # 第二次读取
+        iface_line=$(grep "$interface:" /proc/net/dev)
+        rx_bytes_2=$(echo "$iface_line" | awk '{print $2}')
+        tx_bytes_2=$(echo "$iface_line" | awk '{print $10}')
+        debug "第二次读取 - 接收字节: $rx_bytes_2, 发送字节: $tx_bytes_2"
+        
+        # 计算2秒内的速度
+        download_speed=$(( (rx_bytes_2 - rx_bytes_1) / 2 ))
+        upload_speed=$(( (tx_bytes_2 - tx_bytes_1) / 2 ))
+        
+        # 处理可能的负值（计数器重置）
+        if [ "$download_speed" -lt 0 ]; then 
+            debug "接收速度为负值，重置为0"
+            download_speed=0
+        fi
+        if [ "$upload_speed" -lt 0 ]; then 
+            debug "发送速度为负值，重置为0"
+            upload_speed=0
+        fi
+        
+        log "网络速度 - 下载: $download_speed 字节/秒, 上传: $upload_speed 字节/秒"
+        log "总流量 - 下载: $rx_bytes_2 字节, 上传: $tx_bytes_2 字节"
+        
+        # 返回JSON格式的数据
+        echo "{\"upload_speed\":$upload_speed,\"download_speed\":$download_speed,\"total_upload\":$tx_bytes_2,\"total_download\":$rx_bytes_2}"
         return
     fi
     
-    network_speed=$(echo "$ifstat_output" | tail -n 1)
-    download_speed=$(echo "$network_speed" | awk '{print $1 * 1024}' | grep -o '[0-9.]*' || echo "0")
-    upload_speed=$(echo "$network_speed" | awk '{print $2 * 1024}' | grep -o '[0-9.]*' || echo "0")
-    
-    # 确保这些值是数字
-    if ! [[ "$download_speed" =~ ^[0-9]*(\.[0-9]*)?$ ]]; then download_speed=0; fi
-    if ! [[ "$upload_speed" =~ ^[0-9]*(\.[0-9]*)?$ ]]; then upload_speed=0; fi
-    
-    rx_bytes=$(cat /proc/net/dev 2>/dev/null | grep "$interface" | awk '{print $2}' || echo "0")
-    tx_bytes=$(cat /proc/net/dev 2>/dev/null | grep "$interface" | awk '{print $10}' || echo "0")
-    
-    # 确保这些值是数字
-    if ! [[ "$rx_bytes" =~ ^[0-9]+$ ]]; then rx_bytes=0; fi
-    if ! [[ "$tx_bytes" =~ ^[0-9]+$ ]]; then tx_bytes=0; fi
-    
-    json="{\"upload_speed\":$upload_speed,\"download_speed\":$download_speed,\"total_upload\":$tx_bytes,\"total_download\":$rx_bytes}"
-    if echo "$json" | jq . >/dev/null 2>&1; then
-        echo "$json"
-    else
-        log "Invalid Network JSON: $json"
-        echo "{\"upload_speed\":0,\"download_speed\":0,\"total_upload\":0,\"total_download\":0}"
-    fi
+    # 如果所有尝试都失败，返回默认值
+    log "无法获取网络数据，返回默认值"
+    echo "{\"upload_speed\":0,\"download_speed\":0,\"total_upload\":0,\"total_download\":0}"
 }
 
 # 获取运行时长
@@ -253,10 +248,21 @@ get_uptime() {
 # 上报数据
 report_metrics() {
     timestamp=$(date +%s)
+    log "开始收集监控数据..."
+    
+    log "收集CPU数据"
     cpu=$(get_cpu_usage)
+    
+    log "收集内存数据"
     memory=$(get_memory_usage)
+    
+    log "收集磁盘数据"
     disk=$(get_disk_usage)
+    
+    log "收集网络数据"
     network=$(get_network_usage)
+    
+    log "收集运行时长"
     uptime=$(get_uptime)
     
     # 验证所有数据是否为有效的JSON
@@ -330,16 +336,23 @@ report_metrics() {
 
 # 主函数
 main() {
-    log "VPS监控脚本启动"
+    log "VPS监控脚本启动 - 修改版本 2025-05-20"
     log "服务器ID: $SERVER_ID"
     log "Worker URL: $WORKER_URL"
     
     # 创建日志文件
     touch "$LOG_FILE"
     
+    # 显示系统信息
+    log "系统信息:"
+    log "$(uname -a)"
+    log "网络接口:"
+    log "$(ip -o link show | grep -v 'lo:' | awk -F': ' '{print $2}')"
+    
     # 主循环
     while true; do
         report_metrics
+        log "休眠 $INTERVAL 秒"
         sleep $INTERVAL
     done
 }
