@@ -4237,7 +4237,7 @@ async function copyVpsInstallScript(serverId, serverName, buttonElement) {
         
         const workerUrl = window.location.origin;
         // The base script command provided by the user
-        const baseScriptUrl = "https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/cf-vps-monitor.sh";
+        const baseScriptUrl = "https://raw.githubusercontent.com/aisuyi065/cf-vps-monitor/main/cf-vps-monitor.sh";
         // Include the fetched interval in the script command
         const scriptCommand = \`wget \${baseScriptUrl} -O cf-vps-monitor.sh && chmod +x cf-vps-monitor.sh && ./cf-vps-monitor.sh -i -k \${apiKey} -s \${serverId} -u \${workerUrl} --interval \${vpsReportInterval}\`;
         
