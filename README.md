@@ -1,3 +1,5 @@
+# 自从上次更新以来，由于一直太忙没空搞，预计年后会有时间，会把一些问题尽量修复，感谢各位一直以来的支持！
+
 # cf-vps-monitor
 [简体中文](https://github.com/kadidalax/cf-vps-monitor/blob/main/README.md) | [English](https://github.com/kadidalax/cf-vps-monitor/blob/main/README-EN.md)
 ## 用cloudflare worker搭建的vps探针 + 网站检测面板。
