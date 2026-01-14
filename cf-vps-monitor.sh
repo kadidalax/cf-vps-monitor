@@ -781,9 +781,9 @@ load_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
     else
-        WORKER_URL="$DEFAULT_WORKER_URL"
-        SERVER_ID="$DEFAULT_SERVER_ID"
-        API_KEY="$DEFAULT_API_KEY"
+        WORKER_URL=$(echo "$DEFAULT_WORKER_URL" | tr -d ' \n\r')
+        SERVER_ID=$(echo "$DEFAULT_SERVER_ID" | tr -d ' \n\r')
+        API_KEY=$(echo "$DEFAULT_API_KEY" | tr -d ' \n\r')
         INTERVAL="$DEFAULT_INTERVAL"
     fi
 }
@@ -800,6 +800,11 @@ record_installation() {
 
 # 保存配置
 save_config() {
+    # 确保保存前清理空白字符
+    WORKER_URL=$(echo "$WORKER_URL" | tr -d ' \n\r')
+    SERVER_ID=$(echo "$SERVER_ID" | tr -d ' \n\r')
+    API_KEY=$(echo "$API_KEY" | tr -d ' \n\r')
+    
     cat > "$CONFIG_FILE" << EOF
 # VPS监控配置文件
 WORKER_URL="$WORKER_URL"
@@ -1037,15 +1042,45 @@ get_memory_usage() {
             used=$((total - free))
         fi
 
-        # 方法3: 容器环境特殊处理
-        if [[ "${CONTAINER_ENV:-false}" == "true" && -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
-            local cgroup_limit=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo "0")
-            local cgroup_usage=$(cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null || echo "0")
-
-            # 如果cgroup限制合理（不是一个巨大的数字），使用cgroup数据
-            if [[ "$cgroup_limit" =~ ^[0-9]+$ && "$cgroup_limit" -lt 274877906944 ]]; then  # 256GB
-                total=$((cgroup_limit / 1024))  # 转换为KB
-                used=$((cgroup_usage / 1024))   # 转换为KB
+        # 方法3: 容器环境特殊处理 (Cgroup V1 & V2)
+        # 即使没有CONTAINER_ENV变量，如果检测到cgroup限制且限制合理，也优先使用
+        local cgroup_limit="0"
+        local cgroup_usage="0"
+        local cgroup_found=false
+        
+        # 尝试检测 Cgroup V2
+        if [[ -f /sys/fs/cgroup/memory.max ]]; then
+            local max_raw=$(cat /sys/fs/cgroup/memory.max 2>/dev/null)
+            if [[ "$max_raw" != "max" && "$max_raw" =~ ^[0-9]+$ ]]; then
+                cgroup_limit="$max_raw"
+                if [[ -f /sys/fs/cgroup/memory.current ]]; then
+                    cgroup_usage=$(cat /sys/fs/cgroup/memory.current 2>/dev/null || echo "0")
+                    cgroup_found=true
+                fi
+            fi
+        fi
+        
+        # 尝试检测 Cgroup V1 (如果V2没找到)
+        if [[ "$cgroup_found" == "false" && -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+            local limit_raw=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo "0")
+            # 忽略极大的值 (未限制)
+            if [[ "$limit_raw" =~ ^[0-9]+$ && "$limit_raw" -lt 9223372036854771712 ]]; then
+                cgroup_limit="$limit_raw"
+                cgroup_usage=$(cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null || echo "0")
+                cgroup_found=true
+            fi
+        fi
+        
+        # 如果找到了有效的cgroup限制，并且限制值小于宿主机物理内存(total)，则使用cgroup数据
+        # 或者如果total是0（上面获取失败），直接使用cgroup数据
+        if [[ "$cgroup_found" == "true" ]]; then
+            local cgroup_total_kb=$((cgroup_limit / 1024))
+            
+            # 只有当cgroup限制明显即使有效（例如小于宿主机内存，或者我们确定是在容器里）时才使用
+            # 这里如果不确定宿主机内存，或者cgroup限制小于宿主机内存，就采用
+            if [[ "$total" == "0" || "$cgroup_total_kb" -lt "$total" ]]; then
+                total=$cgroup_total_kb
+                used=$((cgroup_usage / 1024))
                 free=$((total - used))
             fi
         fi
@@ -1195,8 +1230,13 @@ get_network_usage() {
 
         # 如果没有找到，尝试查找活跃接口
         if [[ -z "$interface" ]] && command_exists netstat; then
-            # 查找有流量的接口（排除lo）
-            interface=$(netstat -i -b | awk 'NR>1 && $1 !~ /^lo/ && ($7 > 0 || $10 > 0) {print $1; exit}')
+            # 尝试1: 查找有流量的接口（排除lo）
+            interface=$(netstat -i -b | awk 'NR>1 && $1 !~ /^lo/ && ($8 > 0 || $11 > 0) {print $1; exit}')
+            
+            # 尝试2: 如果没有找到活跃接口，使用第一个非lo接口
+            if [[ -z "$interface" ]]; then
+                interface=$(netstat -i -b | awk 'NR>1 && $1 !~ /^lo/ {print $1; exit}')
+            fi
         fi
 
         # 如果还是没找到，使用第一个非lo接口
@@ -1229,7 +1269,8 @@ get_network_usage() {
             fi
 
             # 计算速度（简单方法）
-            local speed_file="/tmp/vps_monitor_net_${interface}"
+            local speed_file="${TMPDIR:-/tmp}/vps_monitor_net_${interface}_$(whoami)"
+            mkdir -p "$(dirname "$speed_file")" 2>/dev/null
             local current_time=$(date +%s)
 
             if [[ -f "$speed_file" ]]; then
@@ -1275,15 +1316,14 @@ get_network_usage() {
         # 方法4: 查找活跃的网络接口（改进版）
         if [[ -z "$interface" && -f "/proc/net/dev" ]]; then
             # 查找有流量的接口（排除lo和虚拟接口）
+            # 查找有流量的接口（排除lo和虚拟接口）
             interface=$(awk '/^ *[^:]*:/ {
                 gsub(/:/, "", $1)
                 # 排除回环和虚拟接口
                 if ($1 != "lo" && $1 !~ /^(docker|br-|veth|tun|tap|virbr|vmnet)/) {
-                    # 检查是否有流量（接收或发送字节数 > 1MB）
-                    if ($2 > 1048576 || $10 > 1048576) {
-                        print $1
-                        exit
-                    }
+                    # 只要不是排除的接口，就认为是活动接口，不设置流量阈值
+                    print $1
+                    exit
                 }
             }' /proc/net/dev)
         fi
@@ -1345,7 +1385,8 @@ get_network_usage() {
                 fi
             else
                 # 如果没有ifstat，使用简单的方法计算速度
-                local speed_file="/tmp/vps_monitor_net_${interface}"
+                local speed_file="${TMPDIR:-/tmp}/vps_monitor_net_${interface}_$(whoami)"
+                mkdir -p "$(dirname "$speed_file")" 2>/dev/null
                 local current_time=$(date +%s)
 
                 if [[ -f "$speed_file" ]]; then
@@ -1576,11 +1617,15 @@ report_metrics() {
     # 构建JSON数据
     local data="{\"timestamp\":$timestamp,\"cpu\":$cpu_raw,\"memory\":$memory_raw,\"disk\":$disk_raw,\"network\":$network_raw,\"uptime\":$uptime}"
 
-    log "正在上报数据到 $WORKER_URL/api/report/$SERVER_ID"
+    # 确保API KEY和ID没有多余的空格或换行
+    local clean_api_key=$(echo "$API_KEY" | tr -d ' \n\r')
+    local clean_server_id=$(echo "$SERVER_ID" | tr -d ' \n\r')
+    
+    log "正在上报数据到 $WORKER_URL/api/report/$clean_server_id"
 
-    local response=$(curl -s -w "%{http_code}" -X POST "$WORKER_URL/api/report/$SERVER_ID" \
+    local response=$(curl -s -w "%{http_code}" -X POST "$WORKER_URL/api/report/$clean_server_id" \
         -H "Content-Type: application/json" \
-        -H "X-API-Key: $API_KEY" \
+        -H "X-API-Key: $clean_api_key" \
         -d "$data" 2>/dev/null || echo "000")
 
     local http_code="${response: -3}"
@@ -1706,6 +1751,8 @@ clean_json_string() {
 # 上报监控数据
 report_metrics() {
     local timestamp=\$(date +%s)
+    
+    
     local cpu_raw=\$(get_cpu_usage)
     local memory_raw=\$(get_memory_usage)
     local disk_raw=\$(get_disk_usage)
@@ -1735,15 +1782,21 @@ report_metrics() {
         network_raw='{\\"upload_speed\\":0,\\"download_speed\\":0,\\"total_upload\\":0,\\"total_download\\":0}'
     fi
 
+
     # 构建JSON数据
     local data="{\\"timestamp\\":\$timestamp,\\"cpu\\":\$cpu_raw,\\"memory\\":\$memory_raw,\\"disk\\":\$disk_raw,\\"network\\":\$network_raw,\\"uptime\\":\$uptime}"
 
+    # 确保API KEY和ID没有多余的空格或换行
+    local clean_api_key=\$(echo "\$API_KEY" | tr -d ' \\n\\r')
+    local clean_server_id=\$(echo "\$SERVER_ID" | tr -d ' \\n\\r')
+
     log "正在上报数据..."
 
-    local response=\$(curl -s -w "%{http_code}" -X POST "\$WORKER_URL/api/report/\$SERVER_ID" \\
+    local response=\$(curl -s -w "%{http_code}" -X POST "\$WORKER_URL/api/report/\$clean_server_id" \\
         -H "Content-Type: application/json" \\
-        -H "X-API-Key: \$API_KEY" \\
+        -H "X-API-Key: \$clean_api_key" \\
         -d "\$data" 2>/dev/null || echo "000")
+
 
     local http_code="\${response: -3}"
     local response_body="\${response%???}"
