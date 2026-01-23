@@ -2,11 +2,13 @@
 // 版本: 1.1.0
 // ==================== 配置常量 ====================
 
-// 默认管理员账户配置
-const DEFAULT_ADMIN_CONFIG = {
-  USERNAME: 'admin',
-  PASSWORD: 'monitor2025!',
-};
+// 获取管理员账户配置
+function getAdminConfig(env) {
+  return {
+    USERNAME: env.USERNAME || 'admin',
+    PASSWORD: env.PASSWORD || 'monitor2025!',
+  };
+}
 
 // 安全配置 - 增强验证
 function getSecurityConfig(env) {
@@ -927,24 +929,26 @@ async function applySchemaAlterations(db) {
   }
 }
 
-async function isUsingDefaultPassword(username, password) {
-  return username === DEFAULT_ADMIN_CONFIG.USERNAME && password === DEFAULT_ADMIN_CONFIG.PASSWORD;
+async function isUsingDefaultPassword(username, password, env) {
+  const adminConfig = getAdminConfig(env);
+  return username === adminConfig.USERNAME && password === adminConfig.PASSWORD;
 }
 
 async function createDefaultAdmin(db, env) {
   try {
+    const adminConfig = getAdminConfig(env);
     const adminExists = await db.prepare(
       "SELECT username FROM admin_credentials WHERE username = ?"
-    ).bind(DEFAULT_ADMIN_CONFIG.USERNAME).first();
+    ).bind(adminConfig.USERNAME).first();
 
     if (!adminExists) {
-      const adminPasswordHash = await hashPassword(DEFAULT_ADMIN_CONFIG.PASSWORD);
+      const adminPasswordHash = await hashPassword(adminConfig.PASSWORD);
       const now = Math.floor(Date.now() / 1000);
 
       await db.prepare(`
         INSERT INTO admin_credentials (username, password_hash, created_at, failed_attempts, must_change_password)
         VALUES (?, ?, ?, 0, 0)
-      `).bind(DEFAULT_ADMIN_CONFIG.USERNAME, adminPasswordHash, now).run();
+      `).bind(adminConfig.USERNAME, adminPasswordHash, now).run();
     }
   } catch (error) {
     if (!error.message.includes('no such table')) {
@@ -1109,7 +1113,7 @@ async function handleAuthRoutes(path, method, request, env, corsHeaders, clientI
         'UPDATE admin_credentials SET failed_attempts = 0, locked_until = NULL, last_login = ? WHERE username = ?'
       ).bind(Date.now(), username).run();
 
-      const isUsingDefault = await isUsingDefaultPassword(username, password);
+      const isUsingDefault = await isUsingDefaultPassword(username, password, env);
       const token = await createJWT({ username, usingDefaultPassword: isUsingDefault }, env);
 
       return createSuccessResponse({
