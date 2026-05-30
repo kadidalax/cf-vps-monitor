@@ -1336,7 +1336,7 @@ async function handleServerRoutes(path, method, request, env, corsHeaders) {
         );
       }
 
-      const { name, description } = await request.json();
+      const { name, description } = await parseJsonSafely(request);
       if (!validateInput(name, 'serverName')) {
         return createErrorResponse(
           'Invalid server name',
@@ -1570,9 +1570,9 @@ async function handleVpsRoutes(path, method, request, env, corsHeaders, ctx) {
   // VPS状态查询（公开，无需认证）
   if (path.startsWith('/api/status/') && method === 'GET') {
     try {
-      const serverId = path.split('/')[3]; // 从 /api/status/{serverId} 提取ID
+      const serverId = extractPathSegment(path, 3);
       if (!serverId) {
-        return createErrorResponse('Invalid server ID', '无效的服务器ID', 400, corsHeaders);
+        return createErrorResponse('Invalid server ID', '无效的服务器ID格式', 400, corsHeaders);
       }
 
       // 查询服务器信息（移除权限限制，让前台能正常显示）
@@ -1621,11 +1621,21 @@ async function handleVpsRoutes(path, method, request, env, corsHeaders, ctx) {
   // VPS状态变化通知API
   if (path === '/api/notify/offline' && method === 'POST') {
     try {
-      const { serverId, serverName } = await request.json();
+      const body = await parseJsonSafely(request);
+      const { serverId, serverName } = body;
+
+      if (!serverId || typeof serverId !== 'string' || !serverName || typeof serverName !== 'string') {
+        return createErrorResponse('Invalid input', 'serverId和serverName为必填字段', 400, corsHeaders);
+      }
+
+      // 验证服务器存在
+      const server = await env.DB.prepare('SELECT id, last_notified_down_at FROM servers WHERE id = ?').bind(serverId).first();
+      if (!server) {
+        return createErrorResponse('Server not found', '服务器不存在', 404, corsHeaders);
+      }
 
       // 检查是否已发送过离线通知
-      const server = await env.DB.prepare('SELECT last_notified_down_at FROM servers WHERE id = ?').bind(serverId).first();
-      if (server?.last_notified_down_at) {
+      if (server.last_notified_down_at) {
         return createApiResponse({ success: true, message: 'Already notified' }, 200, corsHeaders);
       }
 
@@ -1638,13 +1648,25 @@ async function handleVpsRoutes(path, method, request, env, corsHeaders, ctx) {
 
       return createApiResponse({ success: true }, 200, corsHeaders);
     } catch (error) {
-            return createErrorResponse('Notification failed', '通知发送失败', 500, corsHeaders);
+      return createErrorResponse('Notification failed', '通知发送失败', 500, corsHeaders);
     }
   }
 
   if (path === '/api/notify/recovery' && method === 'POST') {
     try {
-      const { serverId, serverName } = await request.json();
+      const body = await parseJsonSafely(request);
+      const { serverId, serverName } = body;
+
+      if (!serverId || typeof serverId !== 'string' || !serverName || typeof serverName !== 'string') {
+        return createErrorResponse('Invalid input', 'serverId和serverName为必填字段', 400, corsHeaders);
+      }
+
+      // 验证服务器存在
+      const server = await env.DB.prepare('SELECT id FROM servers WHERE id = ?').bind(serverId).first();
+      if (!server) {
+        return createErrorResponse('Server not found', '服务器不存在', 404, corsHeaders);
+      }
+
       const message = `✅ VPS恢复: 服务器 *${serverName}* 已恢复在线`;
 
       // 清除离线记录
@@ -1656,7 +1678,7 @@ async function handleVpsRoutes(path, method, request, env, corsHeaders, ctx) {
 
       return createApiResponse({ success: true }, 200, corsHeaders);
     } catch (error) {
-            return createErrorResponse('Notification failed', '通知发送失败', 500, corsHeaders);
+      return createErrorResponse('Notification failed', '通知发送失败', 500, corsHeaders);
     }
   }
 
@@ -1763,7 +1785,7 @@ async function handleApiRequest(request, env, ctx) {
     }
 
     try {
-      const { serverIds } = await request.json(); // 按新顺序排列的服务器ID数组
+      const { serverIds } = await parseJsonSafely(request);
 
       if (!Array.isArray(serverIds) || serverIds.length === 0) {
         return new Response(JSON.stringify({
@@ -1791,7 +1813,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -1807,7 +1829,7 @@ async function handleApiRequest(request, env, ctx) {
     }
 
     try {
-      const { sortBy, order } = await request.json(); // sortBy: 'custom'|'name'|'status', order: 'asc'|'desc'
+      const { sortBy, order } = await parseJsonSafely(request);
 
       const validSortFields = ['custom', 'name', 'status'];
       const validOrders = ['asc', 'desc'];
@@ -1863,7 +1885,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -1873,6 +1895,11 @@ async function handleApiRequest(request, env, ctx) {
 
   // 服务器排序（管理员）- 保留原有的单个移动功能
   if (path.match(/\/api\/admin\/servers\/[^\/]+\/reorder$/) && method === 'POST') {
+    const user = await authenticateAdmin(request, env);
+    if (!user) {
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
+    }
+
     try {
       const serverId = extractPathSegment(path, 4);
       if (!serverId) {
@@ -1885,7 +1912,7 @@ async function handleApiRequest(request, env, ctx) {
         });
       }
 
-      const { direction } = await request.json();
+      const { direction } = await parseJsonSafely(request);
       if (!['up', 'down'].includes(direction)) {
         return new Response(JSON.stringify({
           error: 'Invalid direction'
@@ -1968,7 +1995,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -1978,48 +2005,34 @@ async function handleApiRequest(request, env, ctx) {
 
   // 更新服务器显示状态（管理员）
   if (path.match(/^\/api\/admin\/servers\/([^\/]+)\/visibility$/) && method === 'POST') {
-    const user = await authenticateRequest(request, env);
+    const user = await authenticateAdmin(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
-      const serverId = path.split('/')[4];
-      const { is_public } = await request.json();
-
-      // 验证输入
-      if (typeof is_public !== 'boolean') {
-        return new Response(JSON.stringify({
-          error: 'Invalid input',
-          message: '显示状态必须为布尔值'
-        }), {
-          status: 400,
-          headers: { 'Content-Type': 'application/json', ...corsHeaders }
-        });
+      const serverId = extractPathSegment(path, 4);
+      if (!serverId) {
+        return createErrorResponse('Invalid server ID', '无效的服务器ID格式', 400, corsHeaders);
       }
 
-      // 更新服务器显示状态
-      await env.DB.prepare(`
+      const { is_public } = await parseJsonSafely(request);
+
+      if (typeof is_public !== 'boolean') {
+        return createErrorResponse('Invalid input', '显示状态必须为布尔值', 400, corsHeaders);
+      }
+
+      const info = await env.DB.prepare(`
         UPDATE servers SET is_public = ? WHERE id = ?
       `).bind(is_public ? 1 : 0, serverId).run();
 
-      return new Response(JSON.stringify({ success: true }), {
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      if (info.changes === 0) {
+        return createErrorResponse('Server not found', '服务器不存在', 404, corsHeaders);
+      }
+
+      return createSuccessResponse({ message: '服务器显示状态已更新' }, corsHeaders);
     } catch (error) {
-            return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return handleDbError(error, corsHeaders, '更新服务器显示状态');
     }
   }
 
@@ -2029,15 +2042,9 @@ async function handleApiRequest(request, env, ctx) {
 
   // 获取监控站点列表（管理员）
   if (path === '/api/admin/sites' && method === 'GET') {
-    const user = await authenticateRequest(request, env);
+    const user = await authenticateAdmin(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
@@ -2073,15 +2080,9 @@ async function handleApiRequest(request, env, ctx) {
 
   // 添加监控站点（管理员）
   if (path === '/api/admin/sites' && method === 'POST') {
-    const user = await authenticateRequest(request, env);
+    const user = await authenticateAdmin(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
@@ -2164,7 +2165,7 @@ async function handleApiRequest(request, env, ctx) {
 
       return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2176,18 +2177,18 @@ async function handleApiRequest(request, env, ctx) {
 
   // 更新监控站点（管理员）
   if (path.match(/\/api\/admin\/sites\/[^\/]+$/) && method === 'PUT') {
-    const user = await authenticateRequest(request, env);
+    const user = await authenticateAdmin(request, env);
     if (!user) {
       return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
-      const siteId = path.split('/').pop();
+      const siteId = extractAndValidateServerId(path);
       if (!siteId) {
-        return createErrorResponse('Invalid site ID', '无效的网站ID', 400, corsHeaders);
+        return createErrorResponse('Invalid site ID', '无效的网站ID格式', 400, corsHeaders);
       }
 
-      const { url, name } = await request.json();
+      const { url, name } = await parseJsonSafely(request);
       if (!url || !url.trim()) {
         return createErrorResponse('Invalid URL', 'URL不能为空', 400, corsHeaders);
       }
@@ -2258,7 +2259,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2268,19 +2269,13 @@ async function handleApiRequest(request, env, ctx) {
 
   // 批量网站排序（管理员）
   if (path === '/api/admin/sites/batch-reorder' && method === 'POST') {
-    const user = await authenticateRequest(request, env);
+    const user = await authenticateAdmin(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
-      const { siteIds } = await request.json(); // 按新顺序排列的站点ID数组
+      const { siteIds } = await parseJsonSafely(request);
 
       if (!Array.isArray(siteIds) || siteIds.length === 0) {
         return new Response(JSON.stringify({
@@ -2308,7 +2303,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2318,19 +2313,13 @@ async function handleApiRequest(request, env, ctx) {
 
   // 自动网站排序（管理员）
   if (path === '/api/admin/sites/auto-sort' && method === 'POST') {
-    const user = await authenticateRequest(request, env);
+    const user = await authenticateAdmin(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
-      const { sortBy, order } = await request.json(); // sortBy: 'custom'|'name'|'url'|'status', order: 'asc'|'desc'
+      const { sortBy, order } = await parseJsonSafely(request);
 
       const validSortFields = ['custom', 'name', 'url', 'status'];
       const validOrders = ['asc', 'desc'];
@@ -2380,7 +2369,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2390,6 +2379,11 @@ async function handleApiRequest(request, env, ctx) {
 
   // 网站排序（管理员）- 保留原有的单个移动功能
   if (path.match(/\/api\/admin\/sites\/[^\/]+\/reorder$/) && method === 'POST') {
+    const user = await authenticateAdmin(request, env);
+    if (!user) {
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
+    }
+
     try {
       const siteId = extractPathSegment(path, 4);
       if (!siteId) {
@@ -2402,7 +2396,7 @@ async function handleApiRequest(request, env, ctx) {
         });
       }
 
-      const { direction } = await request.json();
+      const { direction } = await parseJsonSafely(request);
       if (!['up', 'down'].includes(direction)) {
         return new Response(JSON.stringify({
           error: 'Invalid direction'
@@ -2484,7 +2478,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2494,48 +2488,34 @@ async function handleApiRequest(request, env, ctx) {
 
   // 更新网站显示状态（管理员）
   if (path.match(/^\/api\/admin\/sites\/([^\/]+)\/visibility$/) && method === 'POST') {
-    const user = await authenticateRequest(request, env);
+    const user = await authenticateAdmin(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
-      const siteId = path.split('/')[4];
-      const { is_public } = await request.json();
-
-      // 验证输入
-      if (typeof is_public !== 'boolean') {
-        return new Response(JSON.stringify({
-          error: 'Invalid input',
-          message: '显示状态必须为布尔值'
-        }), {
-          status: 400,
-          headers: { 'Content-Type': 'application/json', ...corsHeaders }
-        });
+      const siteId = extractPathSegment(path, 4);
+      if (!siteId) {
+        return createErrorResponse('Invalid site ID', '无效的站点ID格式', 400, corsHeaders);
       }
 
-      // 更新网站显示状态
-      await env.DB.prepare(`
+      const { is_public } = await parseJsonSafely(request);
+
+      if (typeof is_public !== 'boolean') {
+        return createErrorResponse('Invalid input', '显示状态必须为布尔值', 400, corsHeaders);
+      }
+
+      const info = await env.DB.prepare(`
         UPDATE monitored_sites SET is_public = ? WHERE id = ?
       `).bind(is_public ? 1 : 0, siteId).run();
 
-      return new Response(JSON.stringify({ success: true }), {
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      if (info.changes === 0) {
+        return createErrorResponse('Site not found', '站点不存在', 404, corsHeaders);
+      }
+
+      return createSuccessResponse({ message: '站点显示状态已更新' }, corsHeaders);
     } catch (error) {
-            return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return handleDbError(error, corsHeaders, '更新站点显示状态');
     }
   }
 
@@ -2595,7 +2575,7 @@ async function handleApiRequest(request, env, ctx) {
       }
       return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2624,19 +2604,13 @@ async function handleApiRequest(request, env, ctx) {
 
   // 设置VPS上报间隔（管理员）
   if (path === '/api/admin/settings/vps-report-interval' && method === 'POST') {
-    const user = await authenticateRequest(request, env);
+    const user = await authenticateAdmin(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
-      const { interval } = await request.json();
+      const { interval } = await parseJsonSafely(request);
       if (typeof interval !== 'number' || interval <= 0 || !Number.isInteger(interval)) {
         return new Response(JSON.stringify({
           error: 'Invalid interval value. Must be a positive integer (seconds).'
@@ -2661,7 +2635,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2674,15 +2648,9 @@ async function handleApiRequest(request, env, ctx) {
 
   // 获取Telegram设置（管理员）
   if (path === '/api/admin/telegram-settings' && method === 'GET') {
-    const user = await authenticateRequest(request, env);
+    const user = await authenticateAdmin(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
@@ -2709,7 +2677,7 @@ async function handleApiRequest(request, env, ctx) {
       }
       return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2719,19 +2687,21 @@ async function handleApiRequest(request, env, ctx) {
 
   // 设置Telegram配置（管理员）
   if (path === '/api/admin/telegram-settings' && method === 'POST') {
-    const user = await authenticateRequest(request, env);
+    const user = await authenticateAdmin(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
-      const { bot_token, chat_id, enable_notifications } = await request.json();
+      const { bot_token, chat_id, enable_notifications } = await parseJsonSafely(request);
+
+      if (bot_token !== undefined && bot_token !== null && typeof bot_token !== 'string') {
+        return createErrorResponse('Invalid bot_token', 'bot_token必须为字符串', 400, corsHeaders);
+      }
+      if (chat_id !== undefined && chat_id !== null && typeof chat_id !== 'string') {
+        return createErrorResponse('Invalid chat_id', 'chat_id必须为字符串', 400, corsHeaders);
+      }
+
       const updatedAt = Math.floor(Date.now() / 1000);
       const enableNotifValue = (enable_notifications === true || enable_notifications === 1) ? 1 : 0;
 
@@ -2748,23 +2718,15 @@ async function handleApiRequest(request, env, ctx) {
         if (ctx?.waitUntil) {
           ctx.waitUntil(sendTelegramNotificationOptimized(env.DB, testMessage, 'high'));
         } else {
-                    sendTelegramNotificationOptimized(env.DB, testMessage, 'high').catch(e => {
+          sendTelegramNotificationOptimized(env.DB, testMessage, 'high').catch(e => {
             // 静默处理测试通知错误
           });
         }
       }
 
-      return new Response(JSON.stringify({ success: true }), {
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createSuccessResponse({ message: 'Telegram设置已更新' }, corsHeaders);
     } catch (error) {
-            return new Response(JSON.stringify({
-        error: 'Internal server error',
-        message: error.message
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return handleDbError(error, corsHeaders, '设置Telegram配置');
     }
   }
 
@@ -2818,19 +2780,13 @@ async function handleApiRequest(request, env, ctx) {
 
   // 设置背景配置（管理员）
   if (path === '/api/admin/background-settings' && method === 'POST') {
-    const user = await authenticateRequest(request, env);
+    const user = await authenticateAdmin(request, env);
     if (!user) {
-      return new Response(JSON.stringify({
-        error: 'Unauthorized',
-        message: '需要管理员权限'
-      }), {
-        status: 401,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
     }
 
     try {
-      const { enabled, url, opacity } = await request.json();
+      const { enabled, url, opacity } = await parseJsonSafely(request);
 
       // 验证输入参数
       if (typeof enabled !== 'boolean') {
@@ -2893,7 +2849,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2907,7 +2863,10 @@ async function handleApiRequest(request, env, ctx) {
   // 获取监控站点24小时历史状态（公开）
   if (path.match(/\/api\/sites\/[^\/]+\/history$/) && method === 'GET') {
     try {
-      const siteId = path.split('/')[3];
+      const siteId = extractPathSegment(path, 3);
+      if (!siteId) {
+        return createErrorResponse('Invalid site ID', '无效的站点ID格式', 400, corsHeaders);
+      }
       const nowSeconds = Math.floor(Date.now() / 1000);
       const twentyFourHoursAgoSeconds = nowSeconds - (24 * 60 * 60);
 
@@ -2933,7 +2892,7 @@ async function handleApiRequest(request, env, ctx) {
       }
       return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
