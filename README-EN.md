@@ -55,8 +55,10 @@ Next, create a Worker and deploy the code.
 ### 3. Add Environment Variables
 
 In `Settings` → `Variables and Secrets`, add the following environment variables for enhanced security:
-1. Variable Name: `JWT_SECRET`, Type: `Secret`, Value: `Any random string of about 30 characters`
-2. Save and deploy after adding
+1. Optional Variable Name: `USERNAME`, Type: `Secret`, Value: `Any random string`
+2. Optional Variable Name: `PASSWORD`, Type: `Secret`, Value: `Any random string`
+3. Variable Name: `JWT_SECRET`, Type: `Secret`, Value: `Any random string of about 30 characters`
+4. Save and deploy after adding
 
 ### 4. Bind D1 Database to Worker
 
@@ -90,9 +92,9 @@ After deployment and binding are complete, your monitoring panel should be acces
 
 1. Visit your Worker URL.
 2. Click `Login` in the top-right corner of the page or directly access the `/login` path (e.g., `https://vps-monitor.abo-vendor289.workers.dev/login`).
-3. Login with credentials:
-   * Username: `admin`
-   * Password: `monitor2025!`
+3. Login with environment variable credentials or default credentials:
+   * Default Username: `admin`
+   * Default Password: `monitor2025!`
 4. After login, change the password immediately! Change the password immediately! Change the password immediately!!!
 
 ### 2. Add Server
