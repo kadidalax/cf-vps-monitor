@@ -999,7 +999,7 @@ function getSecureCorsHeaders(origin, env) {
   const config = getSecurityConfig(env);
   const allowedOrigins = config.ALLOWED_ORIGINS;
 
-  let allowedOrigin = 'null';  // 默认拒绝所有跨域请求
+  let allowedOrigin = '';  // 默认拒绝所有跨域请求
 
   // 只有明确配置了允许的域名才允许跨域
   if (allowedOrigins.length > 0 && origin) {
@@ -1024,7 +1024,7 @@ function getSecureCorsHeaders(origin, env) {
     'Access-Control-Allow-Origin': allowedOrigin,
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key',
-    'Access-Control-Allow-Credentials': allowedOrigin !== 'null' ? 'true' : 'false',
+    'Access-Control-Allow-Credentials': allowedOrigin ? 'true' : 'false',
     'Access-Control-Max-Age': '86400',
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
@@ -1289,7 +1289,7 @@ async function handleServerRoutes(path, method, request, env, corsHeaders) {
         );
       }
 
-      const serverId = Math.random().toString(36).substring(2, 8);
+      const serverId = Array.from(crypto.getRandomValues(new Uint8Array(6)), b => b.toString(36).padStart(2, '0')).join('').substring(0, 8);
       // 生成32字节强随机API密钥
       const apiKey = Array.from(crypto.getRandomValues(new Uint8Array(32)), b => b.toString(16).padStart(2, '0')).join('');
       const now = Math.floor(Date.now() / 1000);
@@ -1570,9 +1570,9 @@ async function handleVpsRoutes(path, method, request, env, corsHeaders, ctx) {
   // VPS状态查询（公开，无需认证）
   if (path.startsWith('/api/status/') && method === 'GET') {
     try {
-      const serverId = path.split('/')[3]; // 从 /api/status/{serverId} 提取ID
+      const serverId = extractPathSegment(path, 3);
       if (!serverId) {
-        return createErrorResponse('Invalid server ID', '无效的服务器ID', 400, corsHeaders);
+        return createErrorResponse('Invalid server ID', '无效的服务器ID格式', 400, corsHeaders);
       }
 
       // 查询服务器信息（移除权限限制，让前台能正常显示）
@@ -1618,8 +1618,13 @@ async function handleVpsRoutes(path, method, request, env, corsHeaders, ctx) {
     }
   }
 
-  // VPS状态变化通知API
+  // VPS状态变化通知API（需要管理员认证）
   if (path === '/api/notify/offline' && method === 'POST') {
+    const user = await authenticateAdmin(request, env);
+    if (!user) {
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
+    }
+
     try {
       const { serverId, serverName } = await request.json();
 
@@ -1643,6 +1648,11 @@ async function handleVpsRoutes(path, method, request, env, corsHeaders, ctx) {
   }
 
   if (path === '/api/notify/recovery' && method === 'POST') {
+    const user = await authenticateAdmin(request, env);
+    if (!user) {
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
+    }
+
     try {
       const { serverId, serverName } = await request.json();
       const message = `✅ VPS恢复: 服务器 *${serverName}* 已恢复在线`;
@@ -1711,8 +1721,13 @@ async function handleApiRequest(request, env, ctx) {
     if (vpsResult) return vpsResult;
   }
 
-  // 数据库初始化API（无需认证）
+  // 数据库初始化API（需要管理员认证）
   if (path === '/api/init-db' && ['POST', 'GET'].includes(method)) {
+    const user = await authenticateAdmin(request, env);
+    if (!user) {
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
+    }
+
     try {
       await ensureTablesExist(env.DB, env);
       return createSuccessResponse({
@@ -1721,7 +1736,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
       return createErrorResponse(
         'Database initialization failed',
-        `数据库初始化失败: ${error.message}`,
+        '数据库初始化失败',
         500,
         corsHeaders
       );
@@ -1791,7 +1806,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -1863,7 +1878,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -1873,6 +1888,11 @@ async function handleApiRequest(request, env, ctx) {
 
   // 服务器排序（管理员）- 保留原有的单个移动功能
   if (path.match(/\/api\/admin\/servers\/[^\/]+\/reorder$/) && method === 'POST') {
+    const user = await authenticateAdmin(request, env);
+    if (!user) {
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
+    }
+
     try {
       const serverId = extractPathSegment(path, 4);
       if (!serverId) {
@@ -1968,7 +1988,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -1990,7 +2010,11 @@ async function handleApiRequest(request, env, ctx) {
     }
 
     try {
-      const serverId = path.split('/')[4];
+      const serverId = extractAndValidateServerId(path);
+      if (!serverId) {
+        return createErrorResponse('Invalid server ID', '无效的服务器ID格式', 400, corsHeaders);
+      }
+
       const { is_public } = await request.json();
 
       // 验证输入
@@ -2015,7 +2039,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2164,7 +2188,7 @@ async function handleApiRequest(request, env, ctx) {
 
       return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2182,7 +2206,7 @@ async function handleApiRequest(request, env, ctx) {
     }
 
     try {
-      const siteId = path.split('/').pop();
+      const siteId = extractPathSegment(path, -1);
       if (!siteId) {
         return createErrorResponse('Invalid site ID', '无效的网站ID', 400, corsHeaders);
       }
@@ -2258,7 +2282,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2308,7 +2332,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2380,7 +2404,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2390,6 +2414,11 @@ async function handleApiRequest(request, env, ctx) {
 
   // 网站排序（管理员）- 保留原有的单个移动功能
   if (path.match(/\/api\/admin\/sites\/[^\/]+\/reorder$/) && method === 'POST') {
+    const user = await authenticateAdmin(request, env);
+    if (!user) {
+      return createErrorResponse('Unauthorized', '需要管理员权限', 401, corsHeaders);
+    }
+
     try {
       const siteId = extractPathSegment(path, 4);
       if (!siteId) {
@@ -2484,7 +2513,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2506,7 +2535,11 @@ async function handleApiRequest(request, env, ctx) {
     }
 
     try {
-      const siteId = path.split('/')[4];
+      const siteId = extractPathSegment(path, 4);
+      if (!siteId) {
+        return createErrorResponse('Invalid site ID', '无效的网站ID格式', 400, corsHeaders);
+      }
+
       const { is_public } = await request.json();
 
       // 验证输入
@@ -2531,7 +2564,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2595,7 +2628,7 @@ async function handleApiRequest(request, env, ctx) {
       }
       return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2661,7 +2694,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2709,7 +2742,7 @@ async function handleApiRequest(request, env, ctx) {
       }
       return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2760,7 +2793,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2893,7 +2926,7 @@ async function handleApiRequest(request, env, ctx) {
     } catch (error) {
             return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -2907,7 +2940,11 @@ async function handleApiRequest(request, env, ctx) {
   // 获取监控站点24小时历史状态（公开）
   if (path.match(/\/api\/sites\/[^\/]+\/history$/) && method === 'GET') {
     try {
-      const siteId = path.split('/')[3];
+      const siteId = extractPathSegment(path, 3);
+      if (!siteId) {
+        return createErrorResponse('Invalid site ID', '无效的网站ID格式', 400, corsHeaders);
+      }
+
       const nowSeconds = Math.floor(Date.now() / 1000);
       const twentyFourHoursAgoSeconds = nowSeconds - (24 * 60 * 60);
 
@@ -2933,7 +2970,7 @@ async function handleApiRequest(request, env, ctx) {
       }
       return new Response(JSON.stringify({
         error: 'Internal server error',
-        message: error.message
+        message: '系统暂时不可用，请稍后重试'
       }), {
         status: 500,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -6801,9 +6838,8 @@ async function loadAllServerStatuses() {
         try {
             batchData = await publicApiRequest('/api/status/batch');
         } catch (error) {
-            // 如果批量API失败，可能是数据库未初始化，尝试初始化
-                        await publicApiRequest('/api/init-db');
-            batchData = await publicApiRequest('/api/status/batch');
+            console.error('获取服务器状态失败:', error);
+            batchData = { servers: [] };
         }
 
         const allStatuses = batchData.servers || [];
@@ -7298,9 +7334,8 @@ async function loadAllSiteStatuses() {
         try {
             data = await publicApiRequest('/api/sites/status');
         } catch (error) {
-            // 如果获取网站状态失败，可能是数据库未初始化，尝试初始化
-                        await publicApiRequest('/api/init-db');
-            data = await publicApiRequest('/api/sites/status');
+            console.error('获取网站状态失败:', error);
+            data = { sites: [] };
         }
         const sites = data.sites || [];
 
@@ -7652,7 +7687,7 @@ async function apiRequest(url, options = {}) {
 function loadDefaultCredentials() {
     const credentialsInfo = document.getElementById('defaultCredentialsInfo');
     if (credentialsInfo) {
-        credentialsInfo.innerHTML = '默认账号密码: <strong>admin</strong> / <strong>monitor2025!</strong><br><small class="text-danger fw-bold">建议首次登录后修改密码</small>';
+        credentialsInfo.innerHTML = '<small class="text-muted">请使用管理员账号登录。如未设置环境变量，默认凭据请参阅部署文档。</small>';
     }
 }
 
