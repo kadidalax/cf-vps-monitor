@@ -1,4 +1,4 @@
-# 自从上次更新以来，由于一直太忙没空搞，预计年后会有时间，会把一些问题尽量修复，感谢各位一直以来的支持！
+# 新版本v2.0 重构版即将完成，体验地址：https://cf-vps-monitor.qaq-bde.workers.dev/ , 大家也可以尝试自行部署新版测试，有问题直接提出，后续一起修复。感谢各位一直以来的支持！
 
 # cf-vps-monitor
 [简体中文](https://github.com/kadidalax/cf-vps-monitor/blob/main/README.md) | [English](https://github.com/kadidalax/cf-vps-monitor/blob/main/README-EN.md)
