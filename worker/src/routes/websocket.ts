@@ -250,32 +250,20 @@ wsRoutes.get('/clients/report', async (c) => {
   const region = requestRegion(c);
   const sourceIp = getCloudflareClientIp(c, '');
   const sourceIpIsPublic = isPublicIpAddress(sourceIp);
-  const sourceIpIsIpv6 = sourceIp.includes(':');
-  if (region || sourceIpIsPublic) {
+  if (region) {
     const storedClient = await db.getClient(database, client.uuid);
     const patch: Partial<db.Client> = {};
     if (storedClient) {
-      const sourceIpChanged = sourceIpIsPublic && (
-        (sourceIpIsIpv6 && storedClient.ipv6 !== sourceIp) ||
-        (!sourceIpIsIpv6 && storedClient.ipv4 !== sourceIp)
-      );
       if (
         region &&
         (
           !storedClient.region ||
           isUnknownRegion(storedClient.region) ||
-          (isCountryCodeRegion(storedClient.region) && isDetailedRegion(region)) ||
-          (sourceIpChanged && isDetailedRegion(region))
+          (isCountryCodeRegion(storedClient.region) && isDetailedRegion(region))
         )
       ) {
         patch.region = region;
       }
-      if (sourceIpIsPublic) {
-        if (sourceIpIsIpv6 && storedClient.ipv6 !== sourceIp) patch.ipv6 = sourceIp;
-        if (!sourceIpIsIpv6 && (!isPublicIpAddress(storedClient.ipv4 || '') || storedClient.ipv4 !== sourceIp)) patch.ipv4 = sourceIp;
-      }
-      if (storedClient.ipv4 && !isPublicIpAddress(storedClient.ipv4) && (!sourceIpIsPublic || sourceIpIsIpv6)) patch.ipv4 = '';
-      if (storedClient.ipv6 && !isPublicIpAddress(storedClient.ipv6) && (!sourceIpIsPublic || !sourceIpIsIpv6)) patch.ipv6 = '';
       if (Object.keys(patch).length > 0) {
         await db.updateClient(database, client.uuid, patch);
         await syncAgentNetworkMetadata(c, client, patch);

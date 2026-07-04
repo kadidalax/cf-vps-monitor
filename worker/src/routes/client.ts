@@ -485,7 +485,7 @@ function preferredRegion(...values: unknown[]): string {
 }
 
 function preferredPublicIp(reported: unknown, fallback = '', current = ''): string {
-  for (const value of [fallback, reported, current]) {
+  for (const value of [reported, fallback, current]) {
     const ip = nonEmptyString(value);
     if (ip && isPublicIpAddress(ip)) return ip;
   }

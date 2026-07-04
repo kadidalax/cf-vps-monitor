@@ -524,17 +524,15 @@ export class LiveDataDO {
     const sourceIp = typeof network?.sourceIp === 'string' ? network.sourceIp.trim() : '';
     if (isPublicIpAddress(sourceIp)) {
       if (sourceIp.includes(':')) {
-        safeReport.ipv6 = sourceIp;
-        if (typeof safeReport.ipv4 === 'string' && !isPublicIpAddress(safeReport.ipv4)) delete safeReport.ipv4;
+        if (typeof safeReport.ipv6 !== 'string' || !isPublicIpAddress(safeReport.ipv6)) safeReport.ipv6 = sourceIp;
       } else {
-        safeReport.ipv4 = sourceIp;
-        if (typeof safeReport.ipv6 === 'string' && !isPublicIpAddress(safeReport.ipv6)) delete safeReport.ipv6;
+        if (typeof safeReport.ipv4 !== 'string' || !isPublicIpAddress(safeReport.ipv4)) safeReport.ipv4 = sourceIp;
       }
     }
 
     const region = typeof network?.region === 'string' ? network.region.trim() : '';
     const reportRegion = typeof safeReport.region === 'string' ? safeReport.region.trim() : '';
-    if (region && this.isUsefulRegion(region) && (!this.isUsefulRegion(reportRegion) || (isCountryCodeRegion(reportRegion) && isDetailedRegion(region)))) {
+    if (region && this.isUsefulRegion(region) && !this.isUsefulRegion(reportRegion)) {
       safeReport.region = region;
     }
     if (typeof safeReport.region === 'string' && !this.isUsefulRegion(safeReport.region)) {
