@@ -72,9 +72,17 @@ export function normalizePublicClient(payload: unknown): ClientInfo | null {
 }
 
 export function normalizePublicClients(payload: unknown): ClientInfo[] {
-  return listItems(payload).flatMap((item) => {
+  return sortPublicClients(listItems(payload).flatMap((item) => {
     const client = normalizePublicClient(item);
     return client && !client.hidden ? [client] : [];
+  }));
+}
+
+export function sortPublicClients(clients: ClientInfo[]): ClientInfo[] {
+  return [...clients].sort((a, b) => {
+    const aOrder = Number.isFinite(a.sort_order) ? Number(a.sort_order) : Number.MAX_SAFE_INTEGER;
+    const bOrder = Number.isFinite(b.sort_order) ? Number(b.sort_order) : Number.MAX_SAFE_INTEGER;
+    return aOrder - bOrder || (a.name || '').localeCompare(b.name || '') || a.uuid.localeCompare(b.uuid);
   });
 }
 
@@ -120,5 +128,5 @@ export function mergePublicClientPatch(current: ClientInfo[], detail?: PublicCli
     remove.delete(uuid);
   }
 
-  return [...byUuid.values()];
+  return sortPublicClients([...byUuid.values()]);
 }

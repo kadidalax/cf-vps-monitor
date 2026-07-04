@@ -1,6 +1,6 @@
 import type { LiveDataResponse } from '../contexts/LiveDataContext';
 import { normalizeLiveDataResponse } from './liveDataResponse.ts';
-import { normalizePublicClients } from './publicClients.ts';
+import { normalizePublicClients, sortPublicClients } from './publicClients.ts';
 import { normalizePublicSettings, type PublicSettings } from './publicSettings.ts';
 import { fetchWithBootstrapRetry } from './api.ts';
 import type { ClientInfo } from '../types';
@@ -134,7 +134,7 @@ function applyClientPatch(clients: ClientInfo[] | undefined, patch: PublicBootst
     }
     byUuid.set(client.uuid, next);
   }
-  return [...byUuid.values()];
+  return sortPublicClients([...byUuid.values()]);
 }
 
 function applyStoredClientPatch(payload: PublicBootstrapPayload): PublicBootstrapPayload {
