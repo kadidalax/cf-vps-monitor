@@ -1,0 +1,53 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+worker/node_modules/
+
+# Build outputs
+frontend/dist/
+worker/dist/
+worker/.tmp/
+release/
+*.tsbuildinfo
+
+# Cloudflare local state and secrets
+.wrangler/
+worker/.wrangler/
+.dev.vars*
+!.dev.vars.example
+.env
+.env.*
+!.env.example
+!.env.*.example
+supabase/.temp/
+
+# Test and preview artifacts
+frontend/tests/
+worker/tests/
+.tmp/
+agent/.tmp/
+coverage/
+playwright-report/
+test-results/
+design-previews/
+.superpowers/
+.worktrees/
+cf-monitor-encrypted-backup-*.json
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Generated binaries
+*.exe
+agent/cf-monitor-agent.exe
+agent/agent.exe

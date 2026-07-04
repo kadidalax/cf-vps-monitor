@@ -1,0 +1,35 @@
+{
+  "name": "cf-vps-monitor-monorepo",
+  "private": true,
+  "version": "2.0.0",
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "frontend",
+    "worker"
+  ],
+  "scripts": {
+    "lint": "npm --prefix frontend run lint && npm --prefix worker run lint",
+    "build:migrations": "node scripts/generate-migrations.mjs",
+    "build": "npm --prefix frontend run build && npm --prefix worker run build",
+    "test": "cd agent && go test ./...",
+    "verify": "npm run lint && npm run build && npm test",
+    "verify:cloudflare": "node scripts/deploy-cloudflare.mjs --dry-run --outdir worker/.tmp/wrangler-dry-run --metafile worker/.tmp/wrangler-dry-run/metafile.json",
+    "deploy": "npm run build && node scripts/deploy-cloudflare.mjs",
+    "dev:worker": "npm --prefix worker run dev",
+    "dev:frontend": "npm --prefix frontend run dev"
+  },
+  "cloudflare": {
+    "bindings": {
+      "SUPABASE_URL": {
+        "description": "Supabase 项目的 Project URL，例如 `https://PROJECT_REF.supabase.co`。在 Supabase Project Settings -> API 里复制。"
+      },
+      "SUPABASE_SERVICE_ROLE_KEY": {
+        "description": "Supabase 的 secret/service_role key，不要填 anon key。"
+      },
+      "JWT_SECRET": {
+        "description": "后台登录会话签名密钥。建议使用至少 32 个字符的随机字符串。"
+      }
+    }
+  }
+}

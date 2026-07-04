@@ -1,0 +1,42 @@
+name = "cf-vps-monitor"
+main = "src/index.ts"
+compatibility_date = "2026-06-21"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+invocation_logs = true
+head_sampling_rate = 1
+
+[triggers]
+crons = ["*/2 * * * *"]
+
+[[durable_objects.bindings]]
+name = "LIVE_DATA"
+class_name = "LiveDataDO"
+
+[[durable_objects.bindings]]
+name = "RATE_LIMIT"
+class_name = "RateLimitDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["LiveDataDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["RateLimitDO"]
+
+[vars]
+SUPABASE_URL = "https://PROJECT_REF.supabase.co"
+
+[secrets]
+required = ["JWT_SECRET", "SUPABASE_SERVICE_ROLE_KEY"]
+
+[assets]
+directory = "../frontend/dist"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/ping", "/agent/*"]

@@ -1,0 +1,120 @@
+name: Agent Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Agent version tag, for example v2.0.1
+        required: true
+        type: string
+
+permissions:
+  attestations: write
+  contents: write
+  id-token: write
+
+concurrency:
+  group: agent-release
+  cancel-in-progress: true
+
+jobs:
+  release-agent:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent
+    env:
+      CGO_ENABLED: '0'
+      AGENT_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+
+      - name: Build agent binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist
+          agent_version="${AGENT_VERSION}"
+          if [[ ! "$agent_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.+][A-Za-z0-9][A-Za-z0-9.-]*)?$ ]]; then
+            echo "Invalid version: ${agent_version}" >&2
+            exit 1
+          fi
+          echo "AGENT_VERSION=${agent_version}" >> "$GITHUB_ENV"
+          echo "AGENT_VERSION_TAG=${agent_version}" >> "$GITHUB_ENV"
+          ldflags="-s -w -X main.Version=${agent_version}"
+          echo "Embedding agent version ${agent_version}"
+
+          build() {
+            local goos="$1"
+            local goarch="$2"
+            local output="$3"
+            echo "Building ${output}"
+            GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="$ldflags" -o "dist/${output}" .
+          }
+
+          build linux amd64 cf-vps-monitor-agent-linux-amd64
+          build linux arm64 cf-vps-monitor-agent-linux-arm64
+          build darwin amd64 cf-vps-monitor-agent-darwin-amd64
+          build darwin arm64 cf-vps-monitor-agent-darwin-arm64
+          build windows amd64 cf-vps-monitor-agent-windows-amd64.exe
+          cp install-linux.sh dist/install-linux.sh
+          cp install-windows.ps1 dist/install-windows.ps1
+          (cd dist && sha256sum * > SHA256SUMS)
+
+      - name: Generate artifact provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: agent/dist/*
+
+      - name: Create release tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --tags origin "refs/tags/${AGENT_VERSION_TAG}" >/dev/null 2>&1; then
+            echo "Immutable release tag ${AGENT_VERSION_TAG} already exists."
+          else
+            git tag "$AGENT_VERSION_TAG" "$GITHUB_SHA"
+            git push origin "refs/tags/${AGENT_VERSION_TAG}"
+          fi
+
+      - name: Publish immutable agent release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_notes="Immutable release for ${GITHUB_REPOSITORY}@${GITHUB_SHA}. Artifacts include GitHub artifact attestations."
+
+          if gh release view "$AGENT_VERSION_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$AGENT_VERSION_TAG" \
+              --title "CF VPS Monitor Agent ${AGENT_VERSION}" \
+              --notes "$release_notes" \
+              --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$AGENT_VERSION_TAG" \
+              --verify-tag \
+              --title "CF VPS Monitor Agent ${AGENT_VERSION}" \
+              --notes "$release_notes" \
+              --repo "$GITHUB_REPOSITORY"
+          fi
+
+          gh release upload "$AGENT_VERSION_TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Verify published releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$AGENT_VERSION_TAG" --repo "$GITHUB_REPOSITORY"
+          git ls-remote --exit-code --tags origin "refs/tags/${AGENT_VERSION_TAG}"

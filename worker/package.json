@@ -1,0 +1,26 @@
+{
+  "name": "cf-vps-monitor",
+  "version": "2.0.0",
+  "description": "Cloudflare Worker VPS monitor system",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "lint": "wrangler types --check && tsc --noEmit",
+    "build": "node ../scripts/generate-migrations.mjs && wrangler types --check && tsc --noEmit",
+    "build:frontend": "npm --prefix ../frontend run build",
+    "predeploy": "npm run build:frontend && npm run build",
+    "deploy": "node ../scripts/deploy-cloudflare.mjs"
+  },
+  "dependencies": {
+    "fflate": "^0.8.3",
+    "hono": "^4.12.25",
+    "jose": "^5.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.0.0",
+    "@types/node": "^25.9.3",
+    "typescript": "^5.0.0",
+    "wrangler": "^4.104.0"
+  }
+}

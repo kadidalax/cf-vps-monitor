@@ -1,0 +1,4 @@
+# Cloudflare 部署按钮 / Wrangler 本地开发模板。
+# 这里只放 Worker Secret；普通变量 SUPABASE_URL 由 wrangler.toml 的 [vars] 声明。
+SUPABASE_SERVICE_ROLE_KEY=
+JWT_SECRET=
