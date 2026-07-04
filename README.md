@@ -176,8 +176,8 @@ curl -O https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/cf-vps-m
 
 <a href="https://www.star-history.com/?repos=kadidalax%2Fcf-vps-monitor&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=kadidalax/cf-vps-monitor&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=kadidalax/cf-vps-monitor&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=kadidalax/cf-vps-monitor&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=kadidalax/cf-vps-monitor&type=date&theme=dark&logscale&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=kadidalax/cf-vps-monitor&type=date&logscale&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=kadidalax/cf-vps-monitor&type=date&logscale&legend=top-left" />
  </picture>
 </a>
