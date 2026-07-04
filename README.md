@@ -5,19 +5,6 @@
 ## 用cloudflare worker搭建的vps探针 + 网站检测面板。
 面板示例：https://vps-monitor.abo-vendor289.workers.dev/
 
-PC端前台：
-
-![image](https://github.com/kadidalax/cf-vps-monitor/blob/main/pic/front.jpg)
-
-移动端前台：
-
-![image](https://github.com/kadidalax/cf-vps-monitor/blob/main/pic/mobile.jpg)
-
-后台：
-
-![image](https://github.com/kadidalax/cf-vps-monitor/blob/main/pic/back.jpg)
-
-
 
 # VPS 监控面板 (Cloudflare Worker + D1 版) - 部署指南
 
