@@ -2186,6 +2186,7 @@ type trafficResetState struct {
 	PeriodDown   int64  `json:"period_down"`
 	BaselineUp   int64  `json:"baseline_up,omitempty"`
 	BaselineDown int64  `json:"baseline_down,omitempty"`
+	LastBootUnix int64  `json:"last_boot_unix,omitempty"`
 }
 
 type trafficResetTracker struct {
@@ -2276,6 +2277,13 @@ func rawTrafficCoversPeriod(periodStart time.Time, now time.Time, bootedAt time.
 	return !bootedAt.IsZero() && !bootedAt.Before(periodStart) && !bootedAt.After(now)
 }
 
+func trafficBootUnix(bootedAt time.Time) int64 {
+	if bootedAt.IsZero() {
+		return 0
+	}
+	return bootedAt.Unix()
+}
+
 func maxInt64(a int64, b int64) int64 {
 	if a > b {
 		return a
@@ -2303,12 +2311,28 @@ func (t *trafficResetTracker) adjustSinceBoot(rawUp int64, rawDown int64, now ti
 	periodStart := lastTrafficResetDate(t.resetDay, now)
 	period := periodStart.Format(time.DateOnly)
 	rawCoversPeriod := rawTrafficCoversPeriod(periodStart, now, bootedAt)
+	bootUnix := trafficBootUnix(bootedAt)
+	samePeriod := t.state.ResetDay == t.resetDay && t.state.Period == period && t.state.Scope == t.scope
+	bootChanged := bootUnix != 0 && t.state.LastBootUnix != 0 && t.state.LastBootUnix != bootUnix
+	if samePeriod && rawCoversPeriod && bootChanged {
+		t.state.PeriodUp += rawUp
+		t.state.PeriodDown += rawDown
+		t.state.LastRawUp = rawUp
+		t.state.LastRawDown = rawDown
+		t.state.LastBootUnix = bootUnix
+		t.state.BaselineUp = 0
+		t.state.BaselineDown = 0
+		t.save()
+		return t.state.PeriodUp, t.state.PeriodDown
+	}
 	if t.state.ResetDay == t.resetDay && t.state.Period == period && t.state.Scope == t.scope && rawCoversPeriod &&
+		rawUp >= t.state.PeriodUp && rawDown >= t.state.PeriodDown &&
 		(t.state.PeriodUp < rawUp || t.state.PeriodDown < rawDown) {
 		t.state.PeriodUp = maxInt64(t.state.PeriodUp, rawUp)
 		t.state.PeriodDown = maxInt64(t.state.PeriodDown, rawDown)
 		t.state.LastRawUp = rawUp
 		t.state.LastRawDown = rawDown
+		t.state.LastBootUnix = bootUnix
 		t.state.BaselineUp = 0
 		t.state.BaselineDown = 0
 		t.save()
@@ -2333,6 +2357,7 @@ func (t *trafficResetTracker) adjustSinceBoot(rawUp int64, rawDown int64, now ti
 			t.state.PeriodUp = 0
 			t.state.PeriodDown = 0
 		}
+		t.state.LastBootUnix = bootUnix
 		t.state.BaselineUp = 0
 		t.state.BaselineDown = 0
 		t.save()
@@ -2346,13 +2371,14 @@ func (t *trafficResetTracker) adjustSinceBoot(rawUp int64, rawDown int64, now ti
 			periodDown = rawDown
 		}
 		t.state = trafficResetState{
-			ResetDay:    t.resetDay,
-			Period:      period,
-			Scope:       t.scope,
-			LastRawUp:   rawUp,
-			LastRawDown: rawDown,
-			PeriodUp:    periodUp,
-			PeriodDown:  periodDown,
+			ResetDay:     t.resetDay,
+			Period:       period,
+			Scope:        t.scope,
+			LastRawUp:    rawUp,
+			LastRawDown:  rawDown,
+			PeriodUp:     periodUp,
+			PeriodDown:   periodDown,
+			LastBootUnix: bootUnix,
 		}
 		t.save()
 		log.Printf("traffic tracker initialized for period %s", period)
@@ -2361,18 +2387,17 @@ func (t *trafficResetTracker) adjustSinceBoot(rawUp int64, rawDown int64, now ti
 
 	deltaUp := rawUp - t.state.LastRawUp
 	deltaDown := rawDown - t.state.LastRawDown
-	if deltaUp < 0 {
+	if deltaUp < 0 || deltaDown < 0 {
 		if rawCoversPeriod {
 			deltaUp = rawUp
-		} else {
-			deltaUp = 0
-		}
-	}
-	if deltaDown < 0 {
-		if rawCoversPeriod {
 			deltaDown = rawDown
 		} else {
-			deltaDown = 0
+			if deltaUp < 0 {
+				deltaUp = 0
+			}
+			if deltaDown < 0 {
+				deltaDown = 0
+			}
 		}
 	}
 
@@ -2394,6 +2419,7 @@ func (t *trafficResetTracker) adjustSinceBoot(rawUp int64, rawDown int64, now ti
 	t.state.Scope = t.scope
 	t.state.LastRawUp = rawUp
 	t.state.LastRawDown = rawDown
+	t.state.LastBootUnix = bootUnix
 	t.save()
 	return t.state.PeriodUp, t.state.PeriodDown
 }
