@@ -22,7 +22,16 @@ interface NodeCardProps {
 function NodeRegionTagsLine({ region, tags }: { region?: string; tags?: string }) {
   const tagTexts = parseMonitorTags(tags).map((tag) => tag.text);
   const regionLabel = region || '未知';
-  const fullText = [regionLabel, ...tagTexts].join('  ');
+  const tooltipContent = (
+    <span className="node-card-tag-tooltip-content">
+      <span className="node-card-tag-tooltip-region">{regionLabel}</span>
+      <span className="node-card-tag-tooltip-tags">
+        {tagTexts.map((tag, index) => (
+          <span className="node-card-tag-tooltip-pill" key={`${tag}-${index}`}>{tag}</span>
+        ))}
+      </span>
+    </span>
+  );
   const line = (
     <div className="node-card-region-line node-card-region-tags-line">
       <span className="node-card-region-text">{regionLabel}</span>
@@ -37,7 +46,7 @@ function NodeRegionTagsLine({ region, tags }: { region?: string; tags?: string }
   );
 
   return tagTexts.length > 0 ? (
-    <Tooltip content={fullText} side="bottom">
+    <Tooltip className="node-card-tag-tooltip" content={tooltipContent} side="bottom">
       {line}
     </Tooltip>
   ) : line;
