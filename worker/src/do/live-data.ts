@@ -1401,8 +1401,11 @@ export class LiveDataDO {
   }
 
   private pingResultsFromReport(report: JsonObject): unknown[] {
-    if (Array.isArray(report.ping_results)) return report.ping_results;
-    const ping = report.ping;
+    const raw = report.type === 'report' && isObjectPayload(report.data)
+      ? report.data as JsonObject
+      : report;
+    if (Array.isArray(raw.ping_results)) return raw.ping_results;
+    const ping = raw.ping;
     if (isObjectPayload(ping) && Array.isArray(ping.results)) return ping.results;
     return [];
   }
