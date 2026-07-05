@@ -334,6 +334,45 @@ body {
   white-space: nowrap;
 }
 
+.footer-powered {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.footer-powered a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+  text-decoration: none;
+}
+
+.footer-powered a:hover {
+  color: var(--monitor-accent);
+}
+
+.site-logo-preview {
+  width: 58px;
+  height: 58px;
+  border: 1px solid var(--monitor-border);
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  color: var(--gray-9);
+  background: var(--monitor-panel-strong);
+}
+
+.site-logo-preview img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
 /* ========== Public Dashboard ========== */
 .monitor-dashboard-page {
   width: 100%;

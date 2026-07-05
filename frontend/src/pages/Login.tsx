@@ -16,6 +16,19 @@ type RecoveryStatus = {
   recoverable: boolean;
 };
 
+function safeLogoUrl(value: unknown) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return '';
+  if (raw.startsWith('/') && !raw.startsWith('//')) return raw;
+  try {
+    const url = new URL(raw, window.location.origin);
+    if (url.origin === window.location.origin || url.protocol === 'https:') return url.toString();
+  } catch {
+    return '';
+  }
+  return '';
+}
+
 export default function Login() {
   const { login, isAuthenticated, authLoading } = useAuth();
   const { setDisplayThemeFromSettings } = useDisplayTheme();
@@ -28,6 +41,7 @@ export default function Login() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [version, setVersion] = useState('dev');
+  const [siteLogoUrl, setSiteLogoUrl] = useState('');
   const [recoveryStatus, setRecoveryStatus] = useState<RecoveryStatus | null>(null);
   const [recoveryMode, setRecoveryMode] = useState(false);
   const [recoveryKey, setRecoveryKey] = useState('');
@@ -56,6 +70,7 @@ export default function Login() {
         if (!hasLocalDisplayThemePreference()) {
           setDisplayThemeFromSettings(normalizeDisplayTheme(data.active_theme));
         }
+        setSiteLogoUrl(safeLogoUrl(data.site_logo_url));
       })
       .catch(() => {});
   }, [setDisplayThemeFromSettings]);
@@ -139,7 +154,7 @@ export default function Login() {
       <Card className="login-card" style={{ padding: '36px 32px' }}>
         <Flex direction="column" align="center" gap="2" mb="5">
           <Box className="login-logo">
-            <img src="/app-icon.png" alt="" />
+            <img src={siteLogoUrl || '/app-icon.png'} alt="" />
           </Box>
           <Heading size="6" style={{ fontSize: '1.5rem', letterSpacing: '-0.02em', fontWeight: 700 }}>
             CF VPS Monitor

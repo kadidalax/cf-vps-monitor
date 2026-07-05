@@ -25,6 +25,7 @@ import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { getCloudflareClientIp } from '../utils/request-ip';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { readJsonWithLimit } from '../utils/request-body';
+import { base64ToBytes } from '../utils/theme-package';
 
 const publicRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 type PublicContext = Context<{ Bindings: Bindings; Variables: Variables }>;
@@ -60,6 +61,7 @@ const LOGOUT_CLEAR_SITE_DATA_HEADER = '"cache"';
 const DUMMY_ADMIN_PASSWORD_HASH = 'pbkdf2_sha256$10000$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 const MAX_ADMIN_RECOVERY_KEY_LENGTH = 8192;
 const MAX_ADMIN_RECOVERY_USERNAME_BYTES = 64;
+const SITE_LOGO_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 
 type PublicRateLimitBucket = {
   count: number;
@@ -1208,6 +1210,22 @@ publicRoutes.get('/me', async (c) => {
 });
 
 // 获取所有客户端列表（公开）
+publicRoutes.get('/site-logo', async (c) => {
+  const settings = await db.getSettingsByKeys(getDatabase(c.env), ['site_logo_data', 'site_logo_type']);
+  const contentBase64 = settings.site_logo_data || '';
+  const contentType = settings.site_logo_type || '';
+  if (!contentBase64 || !SITE_LOGO_TYPES.has(contentType)) return c.body(null, 404);
+
+  return new Response(base64ToBytes(contentBase64), {
+    headers: {
+      'Content-Type': contentType,
+      'Cache-Control': 'public, max-age=300, s-maxage=300, stale-while-revalidate=600',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; script-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    },
+  });
+});
+
 publicRoutes.get('/clients', async (c) => {
   const fresh = isFreshPublicMetadataRequest(c);
   const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);

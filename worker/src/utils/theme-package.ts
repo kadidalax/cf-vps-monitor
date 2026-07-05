@@ -199,7 +199,7 @@ export function normalizeThemeManifest(input: unknown): ThemeManifest {
   };
 }
 
-function bytesToBase64(bytes: Uint8Array): string {
+export function bytesToBase64(bytes: Uint8Array): string {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
   let result = '';
   let index = 0;

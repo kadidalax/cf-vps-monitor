@@ -26,6 +26,19 @@ function safeBackgroundUrl(value: unknown) {
   return "";
 }
 
+function safeLogoUrl(value: unknown) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) return "";
+  if (raw.startsWith("/") && !raw.startsWith("//")) return raw;
+  try {
+    const url = new URL(raw, window.location.origin);
+    if (url.origin === window.location.origin || url.protocol === "https:") return url.toString();
+  } catch {
+    return "";
+  }
+  return "";
+}
+
 export default function Layout() {
   const { theme, setTheme } = useTheme();
   const { displayTheme, setDisplayThemeFromSettings, toggleDisplayTheme } = useDisplayTheme();
@@ -34,6 +47,7 @@ export default function Layout() {
   const githubUrl = CF_MONITOR_GITHUB_URL;
   const [siteTitle, setSiteTitle] = useState("CF VPS Monitor");
   const [siteSubtitle, setSiteSubtitle] = useState<string | null>(null);
+  const [siteLogoUrl, setSiteLogoUrl] = useState("");
   const [bgUrlDesktop, setBgUrlDesktop] = useState("");
   const [bgUrlMobile, setBgUrlMobile] = useState("");
   const [mainContentWidth, setMainContentWidth] = useState(100);
@@ -50,6 +64,7 @@ export default function Layout() {
         if (typeof data.site_subtitle === "string" && data.site_subtitle.trim()) {
           setSiteSubtitle(data.site_subtitle);
         }
+        setSiteLogoUrl(safeLogoUrl(data.site_logo_url));
         if (data.theme_settings?.backgroundImageUrlDesktop)
           setBgUrlDesktop(safeBackgroundUrl(data.theme_settings.backgroundImageUrlDesktop));
         if (data.theme_settings?.backgroundImageUrlMobile)
@@ -115,7 +130,7 @@ export default function Layout() {
           <div className="nav-brand">
             <Link to="/" className="nav-brand-link">
               <span className="nav-logo-mark" aria-hidden="true">
-                <img src="/app-icon.png" alt="" />
+                <img src={siteLogoUrl || "/app-icon.png"} alt="" />
               </span>
               <span className="nav-brand-title">{siteTitle}</span>
             </Link>
@@ -185,7 +200,12 @@ export default function Layout() {
       </main>
 
       <footer className="footer">
-        <Text size="2" color="gray">Powered by CF VPS Monitor.</Text>
+        <Text size="2" color="gray" className="footer-powered">
+          <span>Powered by</span>
+          <a href={githubUrl} target="_blank" rel="noreferrer" aria-label="GitHub">
+            <Github size={16} />
+          </a>
+        </Text>
       </footer>
     </div>
   );

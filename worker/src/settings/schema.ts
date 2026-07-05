@@ -57,6 +57,25 @@ export const SETTING_SCHEMA = {
     public: true,
     maxLength: 256,
   },
+  site_logo_url: {
+    type: 'string',
+    defaultValue: '',
+    public: true,
+    maxLength: 256,
+  },
+  site_logo_data: {
+    type: 'string',
+    defaultValue: '',
+    public: false,
+    sensitive: true,
+    maxLength: 1500000,
+  },
+  site_logo_type: {
+    type: 'string',
+    defaultValue: '',
+    public: false,
+    maxLength: 64,
+  },
   record_enabled: {
     type: 'boolean',
     defaultValue: 'true',
@@ -304,6 +323,13 @@ function normalizeScriptDomain(value: unknown): string | null {
   }
 }
 
+function normalizeSiteLogoUrl(value: unknown): string | null {
+  if (value === '' || value === null || value === undefined) return '';
+  if (typeof value !== 'string') return null;
+  const raw = value.trim();
+  return /^\/api\/site-logo(?:\?v=\d+)?$/.test(raw) ? raw : null;
+}
+
 function normalizeSmtpHost(value: unknown): string | null {
   if (value === '' || value === null || value === undefined) return '';
   if (typeof value !== 'string') return null;
@@ -365,6 +391,7 @@ export function normalizeSettingValue(
     }
     case 'string':
       if (key === 'script_domain') normalized = normalizeScriptDomain(value);
+      else if (key === 'site_logo_url') normalized = normalizeSiteLogoUrl(value);
       else if (key === 'email_smtp_host') normalized = normalizeSmtpHost(value);
       else if (key === 'email_smtp_from_address') normalized = normalizeEmailAddress(value);
       else if (key === 'email_smtp_recipients') normalized = normalizeEmailRecipients(value);

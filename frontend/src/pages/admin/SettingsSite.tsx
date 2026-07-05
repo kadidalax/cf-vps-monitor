@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { Box, Button, Flex, Text } from '@radix-ui/themes';
-import { Download, Save, Upload } from 'lucide-react';
+import { Download, Image as ImageIcon, RotateCcw, Save, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import { useApi } from '../../contexts/AuthContext';
@@ -13,6 +13,7 @@ import { buildApiRequest } from '../../utils/api';
 import type { SettingsLayoutOutletContext } from './SettingsLayout';
 
 const MIN_BACKUP_PASSWORD_LENGTH = 6;
+const MAX_LOGO_BYTES = 1024 * 1024;
 
 function backupEncryptPasswordError(password: string): string | null {
   if (Array.from(password).length < MIN_BACKUP_PASSWORD_LENGTH) return `备份密码至少需要 ${MIN_BACKUP_PASSWORD_LENGTH} 位`;
@@ -26,6 +27,8 @@ export default function SettingsSite() {
   const [originalSettings, setOriginalSettings] = useState<SettingsMap>(() => settingsCache.site || {});
   const [loading, setLoading] = useState(!settingsCache.site);
   const [saving, setSaving] = useState(false);
+  const [logoSaving, setLogoSaving] = useState(false);
+  const logoInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     loadSettingsScope('site')
@@ -165,11 +168,86 @@ export default function SettingsSite() {
     }
   };
 
+  const handleUploadLogo = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+      toast.error('Logo 只支持 PNG、JPG、WebP');
+      event.target.value = '';
+      return;
+    }
+    if (file.size > MAX_LOGO_BYTES) {
+      toast.error('Logo 不能超过 1MB');
+      event.target.value = '';
+      return;
+    }
+
+    const form = new FormData();
+    form.append('file', file);
+    setLogoSaving(true);
+    try {
+      const result = await apiFetch('/admin/site-logo', { method: 'POST', body: form });
+      const siteLogoUrl = typeof result.site_logo_url === 'string' ? result.site_logo_url : '';
+      setSettings((prev) => ({ ...prev, site_logo_url: siteLogoUrl }));
+      setOriginalSettings((prev) => ({ ...prev, site_logo_url: siteLogoUrl }));
+      setSettingsScope('site', { ...settings, site_logo_url: siteLogoUrl });
+      notifyPublicDataUpdated();
+      toast.success('Logo 已上传');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Logo 上传失败');
+    } finally {
+      setLogoSaving(false);
+      event.target.value = '';
+    }
+  };
+
+  const handleResetLogo = async () => {
+    setLogoSaving(true);
+    try {
+      await apiFetch('/admin/site-logo/reset', { method: 'POST' });
+      setSettings((prev) => ({ ...prev, site_logo_url: '' }));
+      setOriginalSettings((prev) => ({ ...prev, site_logo_url: '' }));
+      setSettingsScope('site', { ...settings, site_logo_url: '' });
+      notifyPublicDataUpdated();
+      toast.success('已恢复默认 Logo');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '恢复默认 Logo 失败');
+    } finally {
+      setLogoSaving(false);
+    }
+  };
+
   if (loading) return <Loading />;
 
   return (
     <Flex direction="column" gap="4">
       <SettingCard title="基本信息" description="站点名称、描述、语言与安装脚本域名" defaultOpen>
+        <Box style={{ marginBottom: 16 }}>
+          <Text size="2" weight="medium" style={{ display: 'block', marginBottom: 4 }}>站点 Logo</Text>
+          <Text size="1" color="gray" style={{ display: 'block', marginBottom: 8 }}>
+            显示在前台导航栏和后台登录页，支持 PNG、JPG、WebP，最大 1MB。
+          </Text>
+          <Flex align="center" gap="3" wrap="wrap">
+            <Box className="site-logo-preview">
+              {settings.site_logo_url ? <img src={settings.site_logo_url} alt="" /> : <ImageIcon size={22} />}
+            </Box>
+            <Flex gap="2" wrap="wrap">
+              <input
+                ref={logoInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                style={{ display: 'none' }}
+                onChange={handleUploadLogo}
+              />
+              <Button variant="soft" disabled={logoSaving} onClick={() => logoInputRef.current?.click()}>
+                <Upload size={16} /> {logoSaving ? '处理中...' : '上传 Logo'}
+              </Button>
+              <Button variant="soft" color="gray" disabled={logoSaving || !settings.site_logo_url} onClick={handleResetLogo}>
+                <RotateCcw size={16} /> 恢复默认
+              </Button>
+            </Flex>
+          </Flex>
+        </Box>
         <SettingInput
           label="站点标题"
           description="显示在导航栏和浏览器标签页"

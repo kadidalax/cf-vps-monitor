@@ -31,7 +31,8 @@ import { EMAIL_MESSAGE_MAX_CHARS, normalizeRecipients, sendSmtpEmail, type SmtpC
 import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { checkWebsiteMonitorHttp, validateWebsiteMonitorInput } from '../utils/website-monitor';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
-import { readJsonWithLimit } from '../utils/request-body';
+import { readJsonWithLimit, readRequestBytesWithLimit } from '../utils/request-body';
+import { bytesToBase64 } from '../utils/theme-package';
 import { APP_VERSION } from '../utils/app-version';
 import {
   branchPackageJsonUrl,
@@ -106,6 +107,7 @@ const SETTINGS_SCOPE_KEYS = {
     'site_description',
     'language',
     'script_domain',
+    'site_logo_url',
   ],
   general: [
     'record_enabled',
@@ -168,6 +170,7 @@ const AGENT_TOKEN_ROTATION_WARNING_MS = 180 * 24 * 60 * 60 * 1000;
 const AGENT_TOKEN_UNUSED_WARNING_MS = 7 * 24 * 60 * 60 * 1000;
 const AGENT_TOKEN_STALE_USE_WARNING_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_ADMIN_JSON_BYTES = 256 * 1024;
+const MAX_SITE_LOGO_BYTES = 1024 * 1024;
 
 type LiveClientMeta = Partial<Omit<db.Client, 'token' | 'token_hash'>> & Pick<db.Client, 'uuid'>;
 type AdminClientsSnapshot = {
@@ -230,6 +233,21 @@ function runAdminBackground(c: AdminContext, task: Promise<unknown>): void {
 
 function isJsonObjectBody(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isUploadedFile(value: unknown): value is { arrayBuffer(): Promise<ArrayBuffer>; type?: string } {
+  return !!value && typeof value === 'object' && 'arrayBuffer' in value && typeof value.arrayBuffer === 'function';
+}
+
+function detectSiteLogoType(bytes: Uint8Array): string | null {
+  if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+    bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
+  ) return 'image/webp';
+  return null;
 }
 
 function summarizeTelegramTestResult(response: Response, result: unknown): {
@@ -2123,6 +2141,55 @@ adminRoutes.post('/websites/:id/check', async (c) => {
 });
 
 // ============ 系统设置 ============
+
+// 站点 Logo
+adminRoutes.post('/site-logo', async (c) => {
+  const body = await readRequestBytesWithLimit(c.req.raw, MAX_SITE_LOGO_BYTES + 4096);
+  if (!body.ok) return c.json({ error: `Logo 不能超过 ${MAX_SITE_LOGO_BYTES} 字节` }, 413);
+
+  let form: FormData;
+  try {
+    form = await new Response(body.bytes, {
+      headers: { 'Content-Type': c.req.header('Content-Type') || '' },
+    }).formData();
+  } catch {
+    return c.json({ error: 'Logo 表单格式错误' }, 400);
+  }
+
+  const file = form.get('file');
+  if (!isUploadedFile(file)) return c.json({ error: '请上传 Logo 图片' }, 400);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (bytes.byteLength > MAX_SITE_LOGO_BYTES) return c.json({ error: `Logo 不能超过 ${MAX_SITE_LOGO_BYTES} 字节` }, 413);
+
+  const contentType = detectSiteLogoType(bytes);
+  if (!contentType) return c.json({ error: 'Logo 只支持 PNG、JPG、WebP' }, 400);
+
+  const database = getDatabase(c.env);
+  const version = String(Date.now());
+  const siteLogoUrl = `/api/site-logo?v=${version}`;
+  await db.setSettings(database, {
+    site_logo_data: bytesToBase64(bytes),
+    site_logo_type: contentType,
+    site_logo_url: siteLogoUrl,
+  });
+  invalidateAdminSettingsCache();
+  await invalidateAdminPublicMetadata(c);
+  await db.insertAuditLog(database, c.get('username')!, 'settings_save', '上传站点 Logo');
+  return c.json({ success: true, site_logo_url: siteLogoUrl });
+});
+
+adminRoutes.post('/site-logo/reset', async (c) => {
+  const database = getDatabase(c.env);
+  await db.setSettings(database, {
+    site_logo_data: '',
+    site_logo_type: '',
+    site_logo_url: '',
+  });
+  invalidateAdminSettingsCache();
+  await invalidateAdminPublicMetadata(c);
+  await db.insertAuditLog(database, c.get('username')!, 'settings_save', '恢复默认站点 Logo');
+  return c.json({ success: true, site_logo_url: '' });
+});
 
 // 获取所有设置
 adminRoutes.get('/settings', async (c) => {

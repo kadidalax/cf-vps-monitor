@@ -14,6 +14,7 @@ export interface PublicSettings {
   site_description: string;
   language: string;
   script_domain: string;
+  site_logo_url: string;
   ping_record_persist_interval_sec: string;
   live_poll_active_interval_sec: string;
   live_poll_idle_interval_sec: string;
@@ -28,6 +29,7 @@ const DEFAULT_PUBLIC_SETTINGS: PublicSettings = {
   site_description: '服务器监控探针',
   language: 'zh-CN',
   script_domain: '',
+  site_logo_url: '',
   ping_record_persist_interval_sec: '120',
   live_poll_active_interval_sec: '3',
   live_poll_idle_interval_sec: '120',
@@ -81,6 +83,7 @@ export function normalizePublicSettings(payload: unknown): PublicSettings | null
     site_description: stringSetting(record.site_description, DEFAULT_PUBLIC_SETTINGS.site_description, 512),
     language: stringSetting(record.language, DEFAULT_PUBLIC_SETTINGS.language, 32),
     script_domain: stringSetting(record.script_domain, DEFAULT_PUBLIC_SETTINGS.script_domain, 256),
+    site_logo_url: stringSetting(record.site_logo_url, DEFAULT_PUBLIC_SETTINGS.site_logo_url, 256),
     ping_record_persist_interval_sec: secondsSetting(record.ping_record_persist_interval_sec, '120', 60, 3600),
     live_poll_active_interval_sec: secondsSetting(record.live_poll_active_interval_sec, '3', 3, 300),
     live_poll_idle_interval_sec: secondsSetting(record.live_poll_idle_interval_sec, '120', 60, 3600),
