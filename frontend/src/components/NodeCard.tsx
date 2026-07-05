@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { Badge, Box, Card, Flex, IconButton, Separator, Text } from '@radix-ui/themes';
+import { Badge, Box, Card, Flex, IconButton, Separator, Text, Tooltip } from '@radix-ui/themes';
 import { Activity, ArrowDown, ArrowUp, BarChart3, TrendingUp } from 'lucide-react';
 import Flag from './Flag';
 import PriceTags from './PriceTags';
@@ -11,11 +11,36 @@ import { ClientInfo, LiveRecord } from '../types';
 import { getOSDisplay } from '../utils/osIcon';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { formatCpuCardLabel, formatCpuSpec } from '../utils/cpuFormat';
+import { parseMonitorTags } from '../utils/tags';
 
 interface NodeCardProps {
   client: ClientInfo;
   live?: LiveRecord;
   online: boolean;
+}
+
+function NodeRegionTagsLine({ region, tags }: { region?: string; tags?: string }) {
+  const tagTexts = parseMonitorTags(tags).map((tag) => tag.text);
+  const regionLabel = region || '未知';
+  const fullText = [regionLabel, ...tagTexts].join('  ');
+  const line = (
+    <div className="node-card-region-line node-card-region-tags-line" title={fullText}>
+      <span className="node-card-region-text">{regionLabel}</span>
+      {tagTexts.length > 0 && (
+        <span className="node-card-header-tags" aria-label={`标签 ${tagTexts.join(' ')}`}>
+          {tagTexts.map((tag, index) => (
+            <span className="node-card-header-tag" key={`${tag}-${index}`}>{tag}</span>
+          ))}
+        </span>
+      )}
+    </div>
+  );
+
+  return tagTexts.length > 0 ? (
+    <Tooltip content={fullText} side="bottom">
+      {line}
+    </Tooltip>
+  ) : line;
 }
 
 function clampPercent(value: number) {
@@ -241,7 +266,7 @@ export default function NodeCard({ client, live, online }: NodeCardProps) {
     >
       <Link className="node-card-link" to={`/instance/${client.uuid}`} onClick={handleCardLinkClick} style={{ textDecoration: 'none', color: 'inherit' }}>
         <Flex className="node-card-body" direction="column" gap="2">
-          <Flex className="node-card-header" justify="between" align="start" my={isMobile ? '-1' : '0'}>
+          <Flex className="node-card-header" justify="between" align="start" my={isMobile ? '-1' : '0'} data-has-message={d.message ? 'true' : undefined}>
             <Flex justify="start" align="center" style={{ flex: 1, minWidth: 0 }}>
               <Flex direction="column" style={{ minWidth: 0, flex: 1 }}>
                 <Flex className="node-card-title-row" align="center" gap="2">
@@ -257,9 +282,7 @@ export default function NodeCard({ client, live, online }: NodeCardProps) {
                     {client.name}
                   </Text>
                 </Flex>
-                <Text className="node-card-region-line" size="1" color="gray" truncate title={client.region || '未知'}>
-                  {client.region || '未知'}
-                </Text>
+                <NodeRegionTagsLine region={client.region} tags={client.tags} />
               </Flex>
             </Flex>
 
