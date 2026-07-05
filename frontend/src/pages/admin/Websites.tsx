@@ -230,7 +230,7 @@ function SortableWebsiteRow({ monitor, selected, dragDisabled, onSelect, onCheck
       </Table.Cell>
       <Table.Cell className="admin-website-interval-cell">{monitor.interval_sec}s</Table.Cell>
       <Table.Cell className="admin-website-checked-cell">{formatTime(monitor.last_checked_at)}</Table.Cell>
-      <Table.Cell className="admin-website-visibility-cell">{monitor.hidden ? '对非管理员隐藏' : '公开'}</Table.Cell>
+      <Table.Cell className="admin-website-visibility-cell">{monitor.hidden ? '对游客隐藏' : '公开'}</Table.Cell>
       <Table.Cell className="admin-website-actions-cell">
         <Flex className="admin-website-row-actions" gap="1" align="center" wrap="wrap">
           <Button size="1" variant="soft" onClick={() => onCheck(monitor)}><RefreshCw size={13} />检测</Button>
@@ -319,7 +319,7 @@ function SortableWebsiteCard({ monitor, selected, dragDisabled, onSelect, onChec
             </div>
             <div className="admin-node-card-meta">
               <Text className="admin-node-card-section-label" size="1" weight="bold">显示</Text>
-              <Text size="1">{monitor.hidden ? '对非管理员隐藏' : '公开'}</Text>
+              <Text size="1">{monitor.hidden ? '对游客隐藏' : '公开'}</Text>
             </div>
           </div>
         </div>
@@ -843,7 +843,7 @@ export default function AdminWebsites() {
             </Grid>
             <Flex gap="4" wrap="wrap">
               <label className="admin-website-toggle"><Switch checked={form.enabled} onCheckedChange={(value) => update('enabled', value)} />启用检测</label>
-              <label className="admin-website-toggle"><Switch checked={form.hidden} onCheckedChange={(value) => update('hidden', value)} />对非管理员隐藏</label>
+              <label className="admin-website-toggle"><Switch checked={form.hidden} onCheckedChange={(value) => update('hidden', value)} />对游客隐藏</label>
             </Flex>
             <Grid className="admin-website-compact-grid" columns={{ initial: '1', sm: '3' }} gap="3">
               <label>

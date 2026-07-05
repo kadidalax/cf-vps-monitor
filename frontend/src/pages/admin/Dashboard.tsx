@@ -679,7 +679,7 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
             />
             <Flex className="billing-switch-row" gap="3">
               <Flex className="billing-switch-item" align="center" justify="between">
-                <Text size="2">隐藏节点</Text>
+                <Text size="2">对游客隐藏</Text>
                 <Switch checked={Boolean(form.hidden)} onCheckedChange={v => update('hidden', v)} />
               </Flex>
               <Flex className="billing-switch-item" align="center" justify="between">
@@ -1011,7 +1011,7 @@ export default function AdminDashboard() {
         icon: <Layers size={18} />,
       },
       {
-        label: '隐藏节点',
+        label: '对游客隐藏',
         value: String(hiddenCount),
         detail: '不会出现在前台',
         icon: <EyeOff size={18} />,
