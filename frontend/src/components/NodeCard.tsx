@@ -24,7 +24,7 @@ function NodeRegionTagsLine({ region, tags }: { region?: string; tags?: string }
   const regionLabel = region || '未知';
   const fullText = [regionLabel, ...tagTexts].join('  ');
   const line = (
-    <div className="node-card-region-line node-card-region-tags-line" title={fullText}>
+    <div className="node-card-region-line node-card-region-tags-line">
       <span className="node-card-region-text">{regionLabel}</span>
       {tagTexts.length > 0 && (
         <span className="node-card-header-tags" aria-label={`标签 ${tagTexts.join(' ')}`}>
