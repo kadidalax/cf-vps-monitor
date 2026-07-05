@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { Box, Button, Flex, Text } from '@radix-ui/themes';
-import { Download, Image as ImageIcon, RotateCcw, Save, Upload } from 'lucide-react';
+import { Download, RotateCcw, Save, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import { useApi } from '../../contexts/AuthContext';
@@ -229,7 +229,7 @@ export default function SettingsSite() {
           </Text>
           <Flex align="center" gap="3" wrap="wrap">
             <Box className="site-logo-preview">
-              {settings.site_logo_url ? <img src={settings.site_logo_url} alt="" /> : <ImageIcon size={22} />}
+              <img src={settings.site_logo_url || '/app-icon.png'} alt="" />
             </Box>
             <Flex gap="2" wrap="wrap">
               <input
