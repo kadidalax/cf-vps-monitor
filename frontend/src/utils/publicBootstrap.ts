@@ -44,13 +44,13 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function normalizePublicBootstrap(payload: unknown): PublicBootstrapPayload {
+function normalizePublicBootstrap(payload: unknown, options: { includeHidden?: boolean } = {}): PublicBootstrapPayload {
   const record = asRecord(payload);
   if (!record) throw new Error('Invalid public bootstrap response');
   return applyStoredClientPatch({
     settings: record.settings === undefined ? undefined : normalizePublicSettings(record.settings) || undefined,
-    clients: record.clients === undefined ? undefined : normalizePublicClients(record.clients),
-    nodes: record.nodes === undefined ? undefined : normalizePublicClients(record.nodes),
+    clients: record.clients === undefined ? undefined : normalizePublicClients(record.clients, options),
+    nodes: record.nodes === undefined ? undefined : normalizePublicClients(record.nodes, options),
     live: record.live === undefined ? undefined : normalizeLiveDataResponse(record.live),
     metadata_version: typeof record.metadata_version === 'string' ? record.metadata_version : undefined,
     snapshot_at: typeof record.snapshot_at === 'number' && Number.isFinite(record.snapshot_at) ? record.snapshot_at : undefined,
@@ -208,22 +208,24 @@ export function patchCachedPublicBootstrapClients(detail?: PublicBootstrapClient
   if (cached) savePublicBootstrap(applyStoredClientPatch(cached));
 }
 
-export async function fetchPublicBootstrap(options: { cache?: RequestCache; cacheBust?: boolean } = {}): Promise<PublicBootstrapPayload> {
-  if (bootstrapPromise && !options.cacheBust) return bootstrapPromise;
+export async function fetchPublicBootstrap(options: { cache?: RequestCache; cacheBust?: boolean; includeHidden?: boolean } = {}): Promise<PublicBootstrapPayload> {
+  const includeHidden = Boolean(options.includeHidden);
+  if (bootstrapPromise && !options.cacheBust && !includeHidden) return bootstrapPromise;
   const url = new URL('/api/public/bootstrap', typeof window === 'undefined' ? 'http://localhost' : window.location.origin);
   if (options.cacheBust) url.searchParams.set('_fresh', String(Date.now()));
-  const promise = fetchWithBootstrapRetry(`${url.pathname}${url.search}`, options.cache ? { cache: options.cache } : undefined)
+  if (includeHidden) url.searchParams.set('include_hidden', '1');
+  const promise: Promise<PublicBootstrapPayload> = fetchWithBootstrapRetry(`${url.pathname}${url.search}`, options.cache ? { cache: options.cache } : undefined)
     .then((res) => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res.json();
     })
     .then((payload) => {
-      const normalized = normalizePublicBootstrap(payload);
-      return savePublicBootstrap(normalized);
+      const normalized = normalizePublicBootstrap(payload, { includeHidden });
+      return includeHidden ? normalized : savePublicBootstrap(normalized);
     })
     .finally(() => {
       if (bootstrapPromise === promise) bootstrapPromise = null;
     });
-  bootstrapPromise = promise;
-  return bootstrapPromise;
+  if (!includeHidden) bootstrapPromise = promise;
+  return promise;
 }

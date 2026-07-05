@@ -482,6 +482,30 @@ async function getPublicSettings(database: db.QueryDatabase, force = false): Pro
   return settings;
 }
 
+function privateJsonResponse(value: unknown): Response {
+  return new Response(JSON.stringify(value), {
+    headers: {
+      'Content-Type': 'application/json; charset=UTF-8',
+      'Cache-Control': 'no-store',
+    },
+  });
+}
+
+async function hasAdminSession(c: PublicContext): Promise<boolean> {
+  const token = getAdminSessionToken(c);
+  if (!token) return false;
+  try {
+    const payload = await verifyAdminToken(token, c.env);
+    if (!payload) return false;
+    if (await getAdminSessionEdgeCache(payload.userId, payload.sessionVersion)) return true;
+    const user = await validateAdminSession(getDatabase(c.env), payload);
+    if (user) putAdminSessionEdgeCache(c, user);
+    return Boolean(user);
+  } catch {
+    return false;
+  }
+}
+
 async function readAdminClientsSnapshotOverlay(c: PublicContext): Promise<AdminClientsSnapshotOverlay | null> {
   const response = await c.env.LIVE_DATA
     .get(c.env.LIVE_DATA.idFromName('global'))
@@ -497,7 +521,7 @@ async function readAdminClientsSnapshotOverlay(c: PublicContext): Promise<AdminC
   };
 }
 
-function applyPublicClientsOverlay(clients: PublicClient[], overlay: AdminClientsSnapshotOverlay | null): PublicClient[] {
+function applyPublicClientsOverlay(clients: PublicClient[], overlay: AdminClientsSnapshotOverlay | null, includeHidden = false): PublicClient[] {
   if (!overlay) return clients;
   const removed = new Set(overlay.removed);
   const byUuid = new Map(
@@ -507,7 +531,7 @@ function applyPublicClientsOverlay(clients: PublicClient[], overlay: AdminClient
   );
   for (const raw of overlay.clients) {
     const client = toPublicClient(raw as Parameters<typeof toPublicClient>[0]);
-    if (!client.uuid || client.hidden || removed.has(client.uuid)) continue;
+    if (!client.uuid || (!includeHidden && client.hidden) || removed.has(client.uuid)) continue;
     const existing = byUuid.get(client.uuid);
     const next = { ...existing, ...client };
     if (existing) {
@@ -521,15 +545,15 @@ function applyPublicClientsOverlay(clients: PublicClient[], overlay: AdminClient
   return [...byUuid.values()];
 }
 
-async function getPublicClientsSnapshot(c: PublicContext, database: db.QueryDatabase, force = false): Promise<PublicClientsSnapshot> {
+async function getPublicClientsSnapshot(c: PublicContext, database: db.QueryDatabase, force = false, includeHidden = false): Promise<PublicClientsSnapshot> {
   const now = Date.now();
-  if (!force && cacheIsFresh(publicClientsSnapshotCache, now)) return publicClientsSnapshotCache!;
+  if (!includeHidden && !force && cacheIsFresh(publicClientsSnapshotCache, now)) return publicClientsSnapshotCache!;
 
   const clients = await db.listPublicClientRows(database, force);
   let publicClients = clients
-    .filter(client => !client.hidden)
+    .filter(client => includeHidden || !client.hidden)
     .map(toPublicClient);
-  publicClients = applyPublicClientsOverlay(publicClients, await readAdminClientsSnapshotOverlay(c));
+  publicClients = applyPublicClientsOverlay(publicClients, await readAdminClientsSnapshotOverlay(c), includeHidden);
   const publicClientIds = new Set(publicClients.map(client => client.uuid));
   const nodes = publicClients.map((client) => ({
     ...client,
@@ -539,13 +563,14 @@ async function getPublicClientsSnapshot(c: PublicContext, database: db.QueryData
   for (const client of clients) {
     publicClientVisibilityCache.set(client.uuid, { value: !client.hidden, expiresAt });
   }
-  publicClientsSnapshotCache = {
+  const snapshot = {
     clients: publicClients,
     nodes,
     publicClientIds,
     expiresAt,
   };
-  return publicClientsSnapshotCache;
+  if (!includeHidden) publicClientsSnapshotCache = snapshot;
+  return snapshot;
 }
 
 function boundedPublicPingIntervalSec(settings: PublicSettings): number {
@@ -693,28 +718,39 @@ async function preparePublicHistoryRequest(
   database: db.QueryDatabase,
   uuid: string,
   bucket: string,
-): Promise<{ cacheKey: string; visible: boolean; response?: Response }> {
+): Promise<{ cacheKey: string; visible: boolean; includeHidden: boolean; response?: Response }> {
   const cacheKey = publicHistoryCacheKey(c, bucket);
   const limited = await guardPublicHistory(c, bucket);
-  if (limited) return { cacheKey, visible: true, response: limited };
+  const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
+  if (limited) return { cacheKey, visible: true, includeHidden, response: limited };
 
   const cachedVisibility = publicClientVisibilityCache.get(uuid);
 
-  if (cacheIsFresh(cachedVisibility)) {
-    if (!cachedVisibility!.value) return { cacheKey, visible: false };
+  if (!includeHidden && cacheIsFresh(cachedVisibility)) {
+    if (!cachedVisibility!.value) return { cacheKey, visible: false, includeHidden };
     const cached = await getPublicHistoryCache(c, cacheKey);
-    if (cached) return { cacheKey, visible: true, response: cached };
-    return { cacheKey, visible: true };
+    if (cached) return { cacheKey, visible: true, includeHidden, response: cached };
+    return { cacheKey, visible: true, includeHidden };
   }
 
-  const snapshot = await getPublicClientsSnapshot(c, database);
+  const snapshot = await getPublicClientsSnapshot(c, database, false, includeHidden);
   const visible = snapshot.publicClientIds.has(uuid);
-  if (!visible) return { cacheKey, visible: false };
+  if (!visible) return { cacheKey, visible: false, includeHidden };
 
-  const cached = await getPublicHistoryCache(c, cacheKey);
-  if (cached) return { cacheKey, visible: true, response: cached };
+  const cached = includeHidden ? null : await getPublicHistoryCache(c, cacheKey);
+  if (cached) return { cacheKey, visible: true, includeHidden, response: cached };
 
-  return { cacheKey, visible: true };
+  return { cacheKey, visible: true, includeHidden };
+}
+
+function publicHistoryResult(
+  c: PublicContext,
+  prepared: { cacheKey: string; includeHidden: boolean },
+  value: unknown,
+): Response {
+  return prepared.includeHidden
+    ? privateJsonResponse(value)
+    : setPublicHistoryCache(c, prepared.cacheKey, value);
 }
 
 function normalizeLoginUsername(username: string): string {
@@ -1174,12 +1210,13 @@ publicRoutes.get('/me', async (c) => {
 // 获取所有客户端列表（公开）
 publicRoutes.get('/clients', async (c) => {
   const fresh = isFreshPublicMetadataRequest(c);
-  const cached = !fresh ? await getCachedPublicMetadataResponse(c, 'clients') : null;
+  const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
+  const cached = !fresh && !includeHidden ? await getCachedPublicMetadataResponse(c, 'clients') : null;
   if (cached) return cached;
   const limited = await guardPublicMetadata(c, 'clients');
   if (limited) return limited;
-  const snapshot = await getPublicClientsSnapshot(c, getDatabase(c.env), fresh);
-  return setPublicMetadataResponse(c, snapshot.clients, !fresh);
+  const snapshot = await getPublicClientsSnapshot(c, getDatabase(c.env), fresh, includeHidden);
+  return includeHidden ? privateJsonResponse(snapshot.clients) : setPublicMetadataResponse(c, snapshot.clients, !fresh);
 });
 
 // 获取公开设置
@@ -1195,21 +1232,22 @@ publicRoutes.get('/public', async (c) => {
 // 公开首屏 bootstrap：合并设置、节点元数据和最近实时快照，减少冷启动串行请求。
 publicRoutes.get('/public/bootstrap', async (c) => {
   const fresh = isFreshPublicMetadataRequest(c);
-  const cached = !fresh ? await getCachedPublicMetadataResponse(c, 'bootstrap') : null;
+  const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
+  const cached = !fresh && !includeHidden ? await getCachedPublicMetadataResponse(c, 'bootstrap') : null;
   if (cached) return cached;
   const limited = await guardPublicMetadata(c, 'bootstrap');
   if (limited) return limited;
 
   const [settings, snapshot, live] = await Promise.all([
     getPublicSettings(getDatabase(c.env), fresh),
-    getPublicClientsSnapshot(c, getDatabase(c.env), fresh),
+    getPublicClientsSnapshot(c, getDatabase(c.env), fresh, includeHidden),
     c.env.LIVE_DATA
       .get(c.env.LIVE_DATA.idFromName('global'))
       .fetch(new Request('https://do/live', { method: 'GET' }))
       .then(response => readLiveSnapshot(response))
       .then(snapshot => snapshot ?? { online: [], count: 0 }),
   ]);
-  return setPublicMetadataResponse(c, {
+  const payload = {
     settings,
     clients: snapshot.clients,
     nodes: snapshot.nodes,
@@ -1217,7 +1255,8 @@ publicRoutes.get('/public/bootstrap', async (c) => {
     metadata_version: String(snapshot.expiresAt),
     snapshot_at: Date.now(),
     server_time: Date.now(),
-  }, !fresh);
+  };
+  return includeHidden ? privateJsonResponse(payload) : setPublicMetadataResponse(c, payload, !fresh);
 });
 
 // 获取客户端最近的监控记录
@@ -1227,9 +1266,9 @@ publicRoutes.get('/recent/:uuid', async (c) => {
   const database = getDatabase(c.env);
   const prepared = await preparePublicHistoryRequest(c, database, uuid, 'recent');
   if (prepared.response) return prepared.response;
-  if (!prepared.visible) return setPublicHistoryCache(c, prepared.cacheKey, []);
+  if (!prepared.visible) return publicHistoryResult(c, prepared, []);
   const records = await db.getRecentRecords(database, uuid, limit);
-  return setPublicHistoryCache(c, prepared.cacheKey, records);
+  return publicHistoryResult(c, prepared, records);
 });
 
 // 获取系统负载历史记录
@@ -1254,9 +1293,9 @@ publicRoutes.get('/records/load', async (c) => {
     if (wantsPagedResponse(c)) {
       const params = readPublicHistoryPageParams(c, 100, 500);
       if ('response' in params) return params.response;
-      return setPublicHistoryCache(c, prepared.cacheKey, emptyPagedResult(params.page, params.limit));
+      return publicHistoryResult(c, prepared, emptyPagedResult(params.page, params.limit));
     }
-    return setPublicHistoryCache(c, prepared.cacheKey, []);
+    return publicHistoryResult(c, prepared, []);
   }
 
   if (start && end) {
@@ -1266,20 +1305,20 @@ publicRoutes.get('/records/load', async (c) => {
       if (cursorParam.error) return c.json({ error: cursorParam.error }, 400);
       if (cursorParam.cursor) {
         const limit = readIntParam(limitQuery, 100, 500);
-        return setPublicHistoryCache(c, prepared.cacheKey, await db.getRecordsByTimeRangeCursor(database, uuid, start, end, cursorParam.cursor, limit));
+        return publicHistoryResult(c, prepared, await db.getRecordsByTimeRangeCursor(database, uuid, start, end, cursorParam.cursor, limit));
       }
       const params = readPublicHistoryPageParams(c, 100, 500);
       if ('response' in params) return params.response;
-      return setPublicHistoryCache(c, prepared.cacheKey, await db.getRecordsByTimeRangePaged(database, uuid, start, end, params.page, params.limit));
+      return publicHistoryResult(c, prepared, await db.getRecordsByTimeRangePaged(database, uuid, start, end, params.page, params.limit));
     }
 
     const limit = readIntParam(limitQuery, 500, 1000);
-    return setPublicHistoryCache(c, prepared.cacheKey, await db.getRecordsByTimeRangeLimited(database, uuid, start, end, limit));
+    return publicHistoryResult(c, prepared, await db.getRecordsByTimeRangeLimited(database, uuid, start, end, limit));
   }
 
   const records = await db.getRecentRecords(database, uuid, readIntParam(c.req.query('limit'), 150, 500));
   if (wantsPagedResponse(c)) {
-    return setPublicHistoryCache(c, prepared.cacheKey, {
+    return publicHistoryResult(c, prepared, {
       data: records,
       total: records.length,
       page: 1,
@@ -1287,7 +1326,7 @@ publicRoutes.get('/records/load', async (c) => {
       has_more: false,
     });
   }
-  return setPublicHistoryCache(c, prepared.cacheKey, records);
+  return publicHistoryResult(c, prepared, records);
 });
 
 // 获取 GPU 记录
@@ -1313,24 +1352,24 @@ publicRoutes.get('/records/gpu', async (c) => {
     if (wantsPagedResponse(c)) {
       const params = readPublicHistoryPageParams(c, 100, 500);
       if ('response' in params) return params.response;
-      return setPublicHistoryCache(c, prepared.cacheKey, emptyPagedResult(params.page, params.limit));
+      return publicHistoryResult(c, prepared, emptyPagedResult(params.page, params.limit));
     }
-    return setPublicHistoryCache(c, prepared.cacheKey, []);
+    return publicHistoryResult(c, prepared, []);
   }
 
   if (wantsPagedResponse(c)) {
     const cursorParam = readTimeCursorParam(c.req.query('cursor'));
     if (cursorParam.error) return c.json({ error: cursorParam.error }, 400);
     if (cursorParam.cursor) {
-      return setPublicHistoryCache(c, prepared.cacheKey, await db.getGPURecordsCursor(database, uuid, start, end, cursorParam.cursor, limit));
+      return publicHistoryResult(c, prepared, await db.getGPURecordsCursor(database, uuid, start, end, cursorParam.cursor, limit));
     }
     const params = readPublicHistoryPageParams(c, 100, 500);
     if ('response' in params) return params.response;
-    return setPublicHistoryCache(c, prepared.cacheKey, await db.getGPURecordsPaged(database, uuid, start, end, params.page, params.limit));
+    return publicHistoryResult(c, prepared, await db.getGPURecordsPaged(database, uuid, start, end, params.page, params.limit));
   }
 
   const records = await db.getGPURecords(database, uuid, start, end, limit);
-  return setPublicHistoryCache(c, prepared.cacheKey, records);
+  return publicHistoryResult(c, prepared, records);
 });
 
 // 获取 Ping 记录
@@ -1350,24 +1389,24 @@ publicRoutes.get('/records/ping', async (c) => {
     if (wantsPagedResponse(c)) {
       const params = readPublicHistoryPageParams(c, 120, 360);
       if ('response' in params) return params.response;
-      return setPublicHistoryCache(c, prepared.cacheKey, emptyPagedResult(params.page, params.limit));
+      return publicHistoryResult(c, prepared, emptyPagedResult(params.page, params.limit));
     }
-    return setPublicHistoryCache(c, prepared.cacheKey, []);
+    return publicHistoryResult(c, prepared, []);
   }
 
   if (wantsPagedResponse(c)) {
     const cursorParam = readTimeCursorParam(c.req.query('cursor'));
     if (cursorParam.error) return c.json({ error: cursorParam.error }, 400);
     if (cursorParam.cursor) {
-      return setPublicHistoryCache(c, prepared.cacheKey, await db.getPingRecordsCursor(database, uuid, taskId, cursorParam.cursor, limit));
+      return publicHistoryResult(c, prepared, await db.getPingRecordsCursor(database, uuid, taskId, cursorParam.cursor, limit));
     }
     const params = readPublicHistoryPageParams(c, 120, 360);
     if ('response' in params) return params.response;
-    return setPublicHistoryCache(c, prepared.cacheKey, await db.getPingRecordsPaged(database, uuid, taskId, params.page, params.limit));
+    return publicHistoryResult(c, prepared, await db.getPingRecordsPaged(database, uuid, taskId, params.page, params.limit));
   }
 
   const records = await db.getPingRecords(database, uuid, taskId, limit);
-  return setPublicHistoryCache(c, prepared.cacheKey, records);
+  return publicHistoryResult(c, prepared, records);
 });
 
 // 批量获取 Ping 记录。详情页用它一次读取多个任务，避免同一批 ping_snapshots 被重复扫描。
@@ -1389,7 +1428,7 @@ publicRoutes.get('/records/ping/batch', async (c) => {
   const database = getDatabase(c.env);
   const prepared = await preparePublicHistoryRequest(c, database, uuid, 'records-ping-batch');
   if (prepared.response) return prepared.response;
-  if (!prepared.visible) return setPublicHistoryCache(c, prepared.cacheKey, {});
+  if (!prepared.visible) return publicHistoryResult(c, prepared, {});
 
   const records = await db.getPingRecordsForTasks(
     database,
@@ -1399,24 +1438,22 @@ publicRoutes.get('/records/ping/batch', async (c) => {
     baseIntervalSec,
     cursorParam.cursor,
   );
-  return setPublicHistoryCache(c, prepared.cacheKey, records);
+  return publicHistoryResult(c, prepared, records);
 });
 
 // 获取 Ping 任务列表（公开）
 publicRoutes.get('/task/ping', async (c) => {
   const fresh = isFreshPublicMetadataRequest(c);
-  const cached = !fresh ? await getCachedPublicMetadataResponse(c, 'ping-tasks') : null;
+  const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
+  const cached = !fresh && !includeHidden ? await getCachedPublicMetadataResponse(c, 'ping-tasks') : null;
   if (cached) return cached;
   const limited = await guardPublicMetadata(c, 'ping-tasks');
   if (limited) return limited;
   const database = getDatabase(c.env);
-  const snapshot = await getPublicClientsSnapshot(c, database, fresh);
+  const snapshot = await getPublicClientsSnapshot(c, database, fresh, includeHidden);
   const settings = await getPublicSettings(database, fresh);
-  return setPublicMetadataResponse(
-    c,
-    await getPublicPingTasks(database, snapshot.publicClientIds, boundedPublicPingIntervalSec(settings), fresh),
-    !fresh,
-  );
+  const tasks = await getPublicPingTasks(database, snapshot.publicClientIds, boundedPublicPingIntervalSec(settings), fresh);
+  return includeHidden ? privateJsonResponse(tasks) : setPublicMetadataResponse(c, tasks, !fresh);
 });
 
 // 获取网站监控列表（公开）
@@ -1474,12 +1511,13 @@ publicRoutes.get('/websites/:id', async (c) => {
 
 // 节点信息（兼容旧版格式）
 publicRoutes.get('/nodes', async (c) => {
-  const cached = await getCachedPublicMetadataResponse(c, 'nodes');
+  const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
+  const cached = includeHidden ? null : await getCachedPublicMetadataResponse(c, 'nodes');
   if (cached) return cached;
   const limited = await guardPublicMetadata(c, 'nodes');
   if (limited) return limited;
-  const snapshot = await getPublicClientsSnapshot(c, getDatabase(c.env));
-  return setPublicMetadataResponse(c, snapshot.nodes);
+  const snapshot = await getPublicClientsSnapshot(c, getDatabase(c.env), false, includeHidden);
+  return includeHidden ? privateJsonResponse(snapshot.nodes) : setPublicMetadataResponse(c, snapshot.nodes);
 });
 
 // 实时数据 - 代理到 Durable Object

@@ -3,6 +3,7 @@ import { Flex, Text, Box } from '@radix-ui/themes';
 import { useLocation } from 'react-router-dom';
 import { AlertTriangle, Globe2, RadioTower, Signal, UploadCloud } from 'lucide-react';
 import { useLiveData } from '../contexts/LiveDataContext';
+import { useAuth } from '../contexts/AuthContext';
 import { ClientInfo, LiveDataMap } from '../types';
 import { getNodeStatsSummary } from '../utils/monitorView';
 import {
@@ -217,6 +218,7 @@ export function ApiUnavailableNotice({ error }: { error: string }) {
 
 export default function Index() {
   const location = useLocation();
+  const { isAuthenticated } = useAuth();
   const { liveData, error } = useLiveData();
   const monitorMode = new URLSearchParams(location.search).get('view') === 'websites' ? 'websites' : 'servers';
   const initialBootstrap = useMemo(() => getCachedPublicBootstrap(), []);
@@ -247,18 +249,18 @@ export default function Index() {
     setClientsLoading(true);
 
     const loadClients = () => {
-      fetchPublicBootstrap()
+      fetchPublicBootstrap({ includeHidden: isAuthenticated })
         .then(data => {
           if (data.clients !== undefined) return data.clients;
           throw new Error('Bootstrap clients missing');
         })
-        .catch(() => fetchWithBootstrapRetry('/api/clients')
+        .catch(() => fetchWithBootstrapRetry(`/api/clients${isAuthenticated ? '?include_hidden=1' : ''}`)
           .then(res => {
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             return res.json();
           }))
         .then(data => {
-          const clients = normalizePublicClients(data);
+          const clients = normalizePublicClients(data, { includeHidden: isAuthenticated });
           const listPayload = Array.isArray(data) ||
             (Boolean(data) && typeof data === 'object' && Array.isArray((data as { data?: unknown }).data));
           if (listPayload || clients.length > 0) return clients;
@@ -295,7 +297,7 @@ export default function Index() {
         notifyPublicDataReady();
         return;
       }
-      fetchPublicBootstrap({ cache: 'reload', cacheBust: true })
+      fetchPublicBootstrap({ cache: 'reload', cacheBust: true, includeHidden: isAuthenticated })
         .then(data => {
           if (data.clients === undefined) throw new Error('Bootstrap clients missing');
           if (!cancelled && data.clients !== undefined) {
@@ -317,7 +319,7 @@ export default function Index() {
       document.removeEventListener('visibilitychange', loadWhenVisible);
       window.clearInterval(timer);
     };
-  }, [monitorMode]);
+  }, [monitorMode, isAuthenticated]);
 
   useEffect(() => {
     let cancelled = false;

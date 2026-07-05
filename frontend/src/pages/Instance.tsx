@@ -14,6 +14,7 @@ import DetailsGrid from '../components/DetailsGrid';
 import Flag from '../components/Flag';
 import PingYAxisTick from '../components/PingYAxisTick';
 import { useLiveData } from '../contexts/LiveDataContext';
+import { useAuth } from '../contexts/AuthContext';
 import { publicFetch } from '../utils/api';
 import { normalizePublicClients } from '../utils/publicClients';
 import {
@@ -96,6 +97,7 @@ function historyQuery(params: Record<string, string | number | undefined>): stri
 export default function Instance() {
   const { uuid } = useParams<{ uuid: string }>();
   const navigate = useNavigate();
+  const { isAuthenticated } = useAuth();
   const [client, setClient] = useState<ClientInfo | null>(null);
   const [clients, setClients] = useState<ClientInfo[]>([]);
   const [records, setRecords] = useState<PublicMonitorRecord[]>([]);
@@ -144,14 +146,14 @@ export default function Instance() {
     setClientLoading(true);
     try {
       setError(null);
-      const data = await publicFetch('/nodes');
-      const visible = normalizePublicClients(data);
+      const data = await publicFetch(`/nodes${isAuthenticated ? '?include_hidden=1' : ''}`);
+      const visible = normalizePublicClients(data, { includeHidden: isAuthenticated });
       setClients(visible);
       const found = visible.find((c) => c.uuid === uuid) || null;
       if (found) { setClient(found); } else { setError('服务器不存在'); }
     } catch { setError('加载失败'); }
     finally { setClientLoading(false); }
-  }, [uuid]);
+  }, [uuid, isAuthenticated]);
 
   useEffect(() => { loadClient(); }, [loadClient]);
 
@@ -167,11 +169,11 @@ export default function Instance() {
     setRecordsRangeEnd(endTs);
 
     try {
-      const data = await publicFetch(`/records/load?${historyQuery({ uuid, start, end, cursor: end, limit })}`);
+      const data = await publicFetch(`/records/load?${historyQuery({ uuid, start, end, cursor: end, limit, include_hidden: isAuthenticated ? 1 : undefined })}`);
       setRecords(normalizePublicMonitorRecords(data));
     } catch {}
     setRecordsLoading(false);
-  }, [uuid]);
+  }, [uuid, isAuthenticated]);
 
   useEffect(() => {
     loadRecords(timeRange);
@@ -209,7 +211,7 @@ export default function Instance() {
     setPingError(null);
     setPingLoading(true);
 
-    fetchPingTaskSeries(uuid, { limit: 360, maxTasks: 8, rangeHours: timeRangeHours[timeRange], cursor: new Date().toISOString(), signal: controller.signal })
+    fetchPingTaskSeries(uuid, { limit: 360, maxTasks: 8, rangeHours: timeRangeHours[timeRange], cursor: new Date().toISOString(), includeHidden: isAuthenticated, signal: controller.signal })
       .then((series) => {
         if (!controller.signal.aborted) setPingSeries(series);
       })
@@ -224,7 +226,7 @@ export default function Instance() {
       });
 
     return () => controller.abort();
-  }, [shouldLoadPing, timeRange, uuid]);
+  }, [shouldLoadPing, timeRange, uuid, isAuthenticated]);
 
   // Load GPU records (only for GPU-capable clients)
   useEffect(() => {
@@ -234,10 +236,10 @@ export default function Instance() {
     const start = new Date(startTs).toISOString();
     const end = new Date(endTs).toISOString();
 
-    publicFetch(`/records/gpu?${historyQuery({ uuid, start, end, cursor: end, limit: 200 })}`)
+    publicFetch(`/records/gpu?${historyQuery({ uuid, start, end, cursor: end, limit: 200, include_hidden: isAuthenticated ? 1 : undefined })}`)
       .then((data) => setGpuRecords(normalizePublicGpuRecords(data)))
       .catch(() => {});
-  }, [uuid, timeRange, client?.gpu_name]);
+  }, [uuid, timeRange, client?.gpu_name, isAuthenticated]);
 
   const handleTimeRangeChange = (v: string) => {
     const range = v as TimeRange;

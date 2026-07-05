@@ -71,10 +71,10 @@ export function normalizePublicClient(payload: unknown): ClientInfo | null {
   };
 }
 
-export function normalizePublicClients(payload: unknown): ClientInfo[] {
+export function normalizePublicClients(payload: unknown, options: { includeHidden?: boolean } = {}): ClientInfo[] {
   return sortPublicClients(listItems(payload).flatMap((item) => {
     const client = normalizePublicClient(item);
-    return client && !client.hidden ? [client] : [];
+    return client && (options.includeHidden || !client.hidden) ? [client] : [];
   }));
 }
 

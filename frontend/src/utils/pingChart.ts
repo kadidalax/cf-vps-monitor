@@ -295,16 +295,19 @@ export async function fetchPingTaskSeries(
     maxTasks = 8,
     rangeHours,
     cursor = new Date().toISOString(),
+    includeHidden = false,
     signal,
   }: {
     limit?: number;
     maxTasks?: number;
     rangeHours?: number;
     cursor?: string;
+    includeHidden?: boolean;
     signal?: AbortSignal;
   } = {},
 ): Promise<PingTaskSeries[]> {
-  const taskResponse = await fetchWithBootstrapRetry('/api/task/ping', { signal });
+  const hiddenQuery = includeHidden ? '&include_hidden=1' : '';
+  const taskResponse = await fetchWithBootstrapRetry(`/api/task/ping?${hiddenQuery.slice(1)}`, { signal });
   if (!taskResponse.ok) throw new Error(`HTTP ${taskResponse.status}`);
 
   const taskData = await taskResponse.json();
@@ -330,7 +333,7 @@ export async function fetchPingTaskSeries(
       .join(',');
     try {
       const recordsResponse = await fetch(
-        `/api/records/ping/batch?uuid=${encodeURIComponent(uuid)}&task_specs=${encodeURIComponent(taskSpecs)}&base_interval=${baseIntervalSec}&limit=${batchLimit}&cursor=${encodeURIComponent(cursor)}`,
+        `/api/records/ping/batch?uuid=${encodeURIComponent(uuid)}&task_specs=${encodeURIComponent(taskSpecs)}&base_interval=${baseIntervalSec}&limit=${batchLimit}&cursor=${encodeURIComponent(cursor)}${hiddenQuery}`,
         { signal },
       );
       if (recordsResponse.ok) {
@@ -351,7 +354,7 @@ export async function fetchPingTaskSeries(
       try {
         const requestLimit = requestLimitForTask(task);
         const recordsResponse = await fetch(
-          `/api/records/ping?uuid=${encodeURIComponent(uuid)}&task_id=${task.id}&limit=${requestLimit}&cursor=${encodeURIComponent(cursor)}`,
+          `/api/records/ping?uuid=${encodeURIComponent(uuid)}&task_id=${task.id}&limit=${requestLimit}&cursor=${encodeURIComponent(cursor)}${hiddenQuery}`,
           { signal },
         );
         if (!recordsResponse.ok) return { task, records: [] };

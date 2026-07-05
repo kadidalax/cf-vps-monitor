@@ -10,7 +10,6 @@ import {
 } from '@dnd-kit/core';
 import {
   SortableContext,
-  arrayMove,
   rectSortingStrategy,
   sortableKeyboardCoordinates,
   useSortable,
@@ -58,6 +57,7 @@ import {
 import { fetchPublicSettings } from '../../utils/publicSettings';
 import { notifyPublicDataUpdated, subscribePublicDataUpdated } from '../../utils/publicDataEvents';
 import type { PublicDataUpdateDetail } from '../../utils/publicDataEvents';
+import { moveAdminNodeInVisibleOrder } from '../../utils/adminNodeOrder';
 
 interface AdminClient extends ClientInfo {
   token?: string;
@@ -956,15 +956,9 @@ export default function AdminDashboard() {
     const { active, over } = event;
     if (!over || active.id === over.id || dragDisabled) return;
 
-    const oldIndex = clients.findIndex((client) => client.uuid === active.id);
-    const newIndex = clients.findIndex((client) => client.uuid === over.id);
-    if (oldIndex < 0 || newIndex < 0) return;
-
     const previousClients = clients;
-    const nextClients = arrayMove(clients, oldIndex, newIndex).map((client, index) => ({
-      ...client,
-      sort_order: index + 1,
-    }));
+    const nextClients = moveAdminNodeInVisibleOrder(clients, filtered, String(active.id), String(over.id));
+    if (nextClients === clients) return;
     setClients(nextClients);
 
     try {
