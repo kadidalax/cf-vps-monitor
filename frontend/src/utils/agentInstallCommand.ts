@@ -165,9 +165,9 @@ function normalizeInstanceId(value?: string) {
   return (cleaned || 'default').slice(0, 48);
 }
 
-function rootAwareBashPipe(downloadCommand: string, args: string[]) {
+function sudoBashPipe(downloadCommand: string, args: string[]) {
   const quotedArgs = args.map(shellQuote).join(' ');
-  return `${downloadCommand} | { SUDO=; [ "$(id -u)" -eq 0 ] || SUDO=sudo; $SUDO bash -s -- ${quotedArgs}; }`;
+  return `${downloadCommand} | sudo bash -s -- ${quotedArgs}`;
 }
 
 export function buildAgentInstallCommand({
@@ -205,7 +205,7 @@ export function buildAgentInstallCommand({
       const args = ['-s', serverUrl, '-t', token || '<TOKEN>'];
       if (trafficResetDay !== '1') args.push('-r', trafficResetDay);
       if (effectiveNodeName) args.push('-n', effectiveNodeName);
-      if (!dir && !serviceName) args.push('-i', effectiveInstanceId);
+      args.push('-i', effectiveInstanceId);
       if (binaryUrl) args.push('--binary-url', binaryUrl);
       if (checksumUrl) args.push('--checksum-url', checksumUrl);
       if (releaseTag && !binaryUrl) args.push('--release-tag', releaseTag);
@@ -217,7 +217,7 @@ export function buildAgentInstallCommand({
       if (mountExclude) args.push('--mount-exclude', mountExclude);
       if (nicInclude) args.push('--nic-include', nicInclude);
       if (nicExclude) args.push('--nic-exclude', nicExclude);
-      return rootAwareBashPipe(
+      return sudoBashPipe(
         `wget -qO- ${shellQuote(cfMonitorAgentScriptUrl('install-linux.sh', ghproxy, releaseTag, scriptRef))}`,
         args,
       );
@@ -226,7 +226,7 @@ export function buildAgentInstallCommand({
       const args = ['-s', serverUrl, '-t', token || '<TOKEN>'];
       if (trafficResetDay !== '1') args.push('-r', trafficResetDay);
       if (effectiveNodeName) args.push('-n', effectiveNodeName);
-      if (!dir && !serviceName) args.push('-i', effectiveInstanceId);
+      args.push('-i', effectiveInstanceId);
       if (binaryUrl) args.push('-BinaryUrl', binaryUrl);
       if (checksumUrl) args.push('-ChecksumUrl', checksumUrl);
       if (releaseTag && !binaryUrl) args.push('-ReleaseTag', releaseTag);
@@ -245,7 +245,7 @@ export function buildAgentInstallCommand({
       const args = ['-s', serverUrl, '-t', token || '<TOKEN>'];
       if (trafficResetDay !== '1') args.push('-r', trafficResetDay);
       if (effectiveNodeName) args.push('-n', effectiveNodeName);
-      if (!dir && !serviceName) args.push('-i', effectiveInstanceId);
+      args.push('-i', effectiveInstanceId);
       if (binaryUrl) args.push('--binary-url', binaryUrl);
       if (checksumUrl) args.push('--checksum-url', checksumUrl);
       if (releaseTag && !binaryUrl) args.push('--release-tag', releaseTag);
@@ -257,7 +257,7 @@ export function buildAgentInstallCommand({
       if (mountExclude) args.push('--mount-exclude', mountExclude);
       if (nicInclude) args.push('--nic-include', nicInclude);
       if (nicExclude) args.push('--nic-exclude', nicExclude);
-      return rootAwareBashPipe(
+      return sudoBashPipe(
         `curl -fsSL ${shellQuote(cfMonitorAgentScriptUrl('install-linux.sh', ghproxy, releaseTag, scriptRef))}`,
         args,
       );
@@ -284,13 +284,13 @@ export function buildAgentUninstallAllCommand({
       return 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ' +
         `"iwr ${psQuote(scriptUrl('install-windows.ps1'))} -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\\install-windows.ps1' -UninstallAll -Yes"`;
     case 'macos':
-      return rootAwareBashPipe(
+      return sudoBashPipe(
         `curl -fsSL ${shellQuote(scriptUrl('install-linux.sh'))}`,
         ['--uninstall-all', '--yes', ...(proxy ? ['--install-ghproxy', proxy] : [])],
       );
     case 'linux':
     default:
-      return rootAwareBashPipe(
+      return sudoBashPipe(
         `wget -qO- ${shellQuote(scriptUrl('install-linux.sh'))}`,
         ['--uninstall-all', '--yes', ...(proxy ? ['--install-ghproxy', proxy] : [])],
       );
