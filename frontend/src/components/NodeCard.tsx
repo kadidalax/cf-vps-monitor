@@ -10,6 +10,7 @@ import { formatTrafficLimitLabel, parseTrafficLimitType } from '../utils/traffic
 import { ClientInfo, LiveRecord } from '../types';
 import { getOSDisplay } from '../utils/osIcon';
 import { useIsMobile } from '../hooks/useIsMobile';
+import { formatCpuCardLabel, formatCpuSpec } from '../utils/cpuFormat';
 
 interface NodeCardProps {
   client: ClientInfo;
@@ -27,11 +28,13 @@ function CompactMetric({
   value,
   detail,
   percent,
+  title,
 }: {
   label: string;
   value: string;
   detail: string;
   percent?: number;
+  title?: string;
 }) {
   return (
     <div className="node-metric-tile" data-load={typeof percent === 'number' ? (percent >= 85 ? 'hot' : percent >= 65 ? 'warm' : 'normal') : undefined}>
@@ -39,7 +42,7 @@ function CompactMetric({
         <Text className="node-metric-label" size="1">{label}</Text>
         <Text className="node-metric-value" size="2" weight="bold">{value}</Text>
       </Flex>
-      <Text className="node-metric-detail" size="1">{detail}</Text>
+      <Text className="node-metric-detail" size="1" title={title || detail}>{detail}</Text>
       {typeof percent === 'number' && (
         <span className="node-metric-bar" aria-hidden="true">
           <span style={{ transform: `scaleX(${clampPercent(percent) / 100})` }} />
@@ -206,6 +209,8 @@ export default function NodeCard({ client, live, online }: NodeCardProps) {
   const uptimeFooterLabel = online ? uptimeLabel : '当前离线';
   const memDetail = `${formatBytes(d.ram)} / ${formatBytes(memTotal)}`;
   const diskDetail = `${formatBytes(d.disk)} / ${formatBytes(diskTotal)}`;
+  const cpuDetail = formatCpuCardLabel(client.cpu_name, client.cpu_cores);
+  const cpuTitle = formatCpuSpec(client.cpu_name, client.cpu_cores);
 
   const trafficUsed = (() => {
     if (!client.traffic_limit || client.traffic_limit <= 0) return 0;
@@ -328,7 +333,7 @@ export default function NodeCard({ client, live, online }: NodeCardProps) {
 
             <div className="node-card-next-layout" data-monitor-layout="next">
               <div className="node-metric-grid">
-                <CompactMetric label="CPU" value={formatPercent(cpuPct)} detail="处理器" percent={cpuPct} />
+                <CompactMetric label="CPU" value={formatPercent(cpuPct)} detail={cpuDetail} title={cpuTitle} percent={cpuPct} />
                 <CompactMetric label="内存" value={formatPercent(memPct)} detail={memDetail} percent={memPct} />
                 <CompactMetric label="磁盘" value={formatPercent(diskPct)} detail={diskDetail} percent={diskPct} />
                 <CompactMetric

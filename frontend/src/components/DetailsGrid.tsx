@@ -12,6 +12,7 @@ import {
   Wifi,
 } from 'lucide-react';
 import { formatBytes } from '../utils/format';
+import { formatCpuSpec } from '../utils/cpuFormat';
 
 interface DetailsGridProps {
   client: {
@@ -42,15 +43,6 @@ interface DetailsGridProps {
   uuid?: string;
   compact?: boolean;
   remark?: string;
-}
-
-function formatCpuSpec(client: DetailsGridProps['client']) {
-  const name = client.cpu_name?.trim();
-  const cores = Number(client.cpu_cores || 0);
-  if (name && cores > 0) return `${name} (x${cores})`;
-  if (name) return name;
-  if (cores > 0) return `x${cores}`;
-  return '-';
 }
 
 function formatSupport(supported?: boolean, sourceValue?: string) {
@@ -138,7 +130,7 @@ export default function DetailsGrid({ client, box, align, compact, remark }: Det
   const items = [
     {
       label: 'CPU',
-      value: formatCpuSpec(client),
+      value: formatCpuSpec(client.cpu_name, client.cpu_cores),
       icon: <Cpu size={16} />,
     },
     {

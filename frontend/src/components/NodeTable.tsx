@@ -12,6 +12,7 @@ import PriceTags from './PriceTags';
 import { formatBytes, formatPercent, formatSpeed, formatUptime } from '../utils/format';
 import { getOSImage, getOSName } from '../utils/osIcon';
 import { ClientInfo, LiveDataMap, LiveRecord } from '../types';
+import { formatCpuSpec } from '../utils/cpuFormat';
 
 interface NodeTableProps {
   nodes: ClientInfo[];
@@ -108,15 +109,6 @@ function RemarkDetailRow({ value }: { value?: string }) {
   );
 }
 
-function formatCpuSpec(node: ClientInfo) {
-  const name = node.cpu_name?.trim();
-  const cores = Number(node.cpu_cores || 0);
-  if (name && cores > 0) return `${name} (x${cores})`;
-  if (name) return name;
-  if (cores > 0) return `x${cores}`;
-  return '-';
-}
-
 function getSortOrder(node: ClientInfo) {
   return typeof node.sort_order === 'number' && Number.isFinite(node.sort_order)
     ? node.sort_order
@@ -151,7 +143,7 @@ function ExpandedNodeDetails({
       <div className="node-table-expanded-layout">
         <div className="node-table-detail-sections">
           <DetailSection title="资源规格">
-            <DetailRow label="CPU" value={formatCpuSpec(node)} />
+            <DetailRow label="CPU" value={formatCpuSpec(node.cpu_name, node.cpu_cores)} />
             <DetailRow label="内存" value={formatBytes(node.mem_total || live?.ram_total || 0)} />
             <DetailRow label="交换" value={formatBytes(node.swap_total || live?.swap_total || 0)} />
             <DetailRow label="磁盘" value={formatBytes(node.disk_total || live?.disk_total || 0)} />
