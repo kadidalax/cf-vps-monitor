@@ -18,6 +18,7 @@ import {
 } from '../settings/schema';
 import { bestEffortRecordHealthEvent, errorDetail } from '../utils/observability';
 import { isPublicIpAddress } from '../utils/request-ip';
+import { unwrapMonitorReportEnvelope } from '../utils/report-envelope';
 import { checkWebsiteMonitorHttp } from '../utils/website-monitor';
 
 // 客户端状态
@@ -1732,10 +1733,12 @@ export class LiveDataDO {
       return;
     }
 
-      const report = this.updateClientReport(clientId, clientName, hidden, data, now, undefined, ws);
-    this.runBackground('ping_persistence', this.persistPingResultsFromReport(clientId, data, now));
-    this.runBackground('website_probe_persistence', this.persistWebsiteProbeResultsFromReport(clientId, data, now));
-    this.runBackground('do_basic_info_sync', this.syncBasicInfoFromReport(clientId, clientName, hidden, report));
+    const rawReport = unwrapMonitorReportEnvelope(data);
+    const reportTime = this.reportTimestamp(rawReport, now);
+    const report = this.updateClientReport(clientId, clientName, hidden, rawReport, reportTime, undefined, ws);
+    this.runBackground('ping_persistence', this.persistPingResultsFromReport(clientId, rawReport, reportTime));
+    this.runBackground('website_probe_persistence', this.persistWebsiteProbeResultsFromReport(clientId, rawReport, reportTime));
+    this.runBackground('do_basic_info_sync', this.syncBasicInfoFromReport(clientId, clientName, hidden, rawReport));
 
     if (ws.readyState === WebSocket.READY_STATE_OPEN) {
       try {
@@ -1747,7 +1750,7 @@ export class LiveDataDO {
 
     // 持久化放在实时响应之后，避免数据库写入延迟阻塞 Agent WebSocket ack。
     this.runBackground('do_agent_policy', this.sendCurrentPolicyToAgent(ws, now, false, false, clientId));
-    this.runBackground('do_record_persistence', this.persistReport(clientId, report, now));
+    this.runBackground('do_record_persistence', this.persistReport(clientId, report, reportTime));
   }
 
   async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): Promise<void> {
