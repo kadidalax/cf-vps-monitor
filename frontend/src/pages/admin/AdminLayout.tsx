@@ -22,6 +22,7 @@ export default function AdminLayout() {
   const githubUrl = CF_MONITOR_GITHUB_URL;
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [version, setVersion] = useState("dev");
+  const [hasUpdate, setHasUpdate] = useState(false);
 
   useEffect(() => {
     if (!authLoading && !isAuthenticated) {
@@ -40,6 +41,14 @@ export default function AdminLayout() {
       })
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    fetch("/api/admin/update-check")
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => setHasUpdate(Boolean(data?.has_update)))
+      .catch(() => {});
+  }, [isAuthenticated]);
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -216,7 +225,16 @@ export default function AdminLayout() {
             </Button>
           </Flex>
           <Flex px="4" pb="2" justify="center">
-            <Text size="1" color="gray">{version}</Text>
+            <Button
+              variant="ghost"
+              size="1"
+              onClick={() => navigate("/admin/about")}
+              style={{ maxWidth: "100%", padding: "2px 6px" }}
+            >
+              <Text size="1" color={hasUpdate ? "orange" : "gray"}>
+                {version}{hasUpdate ? " · 有更新" : ""}
+              </Text>
+            </Button>
           </Flex>
         </div>
       </aside>

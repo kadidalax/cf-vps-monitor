@@ -12,19 +12,16 @@ import { hashPassword, validateAdminPasswordStrength, verifyPassword } from '../
 import { setAdminSessionCookie } from '../auth/session';
 import { SETTING_SCHEMA, buildAdminSettings, sanitizeSettingsForStorage } from '../settings/schema';
 import {
-  BACKUP_EXCLUDED_MODULES,
   BACKUP_ENCRYPTION_ALGORITHM,
   ENCRYPTED_BACKUP_SCHEMA_ID,
-  BACKUP_SCHEMA_ID,
   BACKUP_SCOPE,
-  BACKUP_VERSION,
   MAX_BACKUP_BYTES,
   decryptBackup,
   encryptBackup,
   summarizeBackup,
   validateBackup,
-  type BackupData,
 } from '../utils/backup';
+import { buildBackupSnapshot } from '../utils/backup-snapshot';
 import { getCloudflareClientIp } from '../utils/request-ip';
 import { validatePingTaskInput } from '../utils/ping-task';
 import { generateAgentToken, validateClientCreateInput, validateClientUpdateInput } from '../utils/client';
@@ -35,6 +32,15 @@ import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { checkWebsiteMonitorHttp, validateWebsiteMonitorInput } from '../utils/website-monitor';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { readJsonWithLimit } from '../utils/request-body';
+import { APP_VERSION } from '../utils/app-version';
+import {
+  branchPackageJsonUrl,
+  compareVersions,
+  normalizeGitSha,
+  shortGitSha,
+  workflowUrlFromRepositoryUrl,
+  type UpdateCheckResult,
+} from '../utils/update-check';
 import { deleteAdminSessionEdgeCache, invalidatePublicMetadataCache, purgePublicMetadataEdgeCache } from './public';
 import { invalidateAgentClientAuthCache, invalidateAgentPingTaskCache } from './client';
 import { invalidateLiveViewerSettingsCache } from './websocket';
@@ -66,6 +72,9 @@ const ADMIN_PING_TASKS_EDGE_CACHE_SECONDS = 15;
 const ADMIN_SETTINGS_SCOPE_CACHE_MS = 10_000;
 const HEALTH_CACHE_MS = 30_000;
 const ALLOWED_CLIENT_IDS_CACHE_MS = 30_000;
+const DEFAULT_UPDATE_SOURCE_REPOSITORY = 'kadidalax/cf-vps-monitor';
+const UPDATE_CHECK_CACHE_MS = 10 * 60 * 1000;
+const updateCheckCache = new Map<string, { expiresAt: number; value: UpdateCheckResult }>();
 const LIVE_POLICY_SETTING_KEYS = new Set([
   'live_poll_active_interval_sec',
   'live_poll_idle_interval_sec',
@@ -577,30 +586,6 @@ function pingTaskAuditDetail(event: string, task: PingTaskAuditSource, previous?
     task: current,
     ...(previous ? { previous: pingTaskAuditSnapshot(previous) } : {}),
   });
-}
-
-async function buildBackupSnapshot(database: db.QueryDatabase): Promise<BackupData> {
-  const clients = await db.listClients(database);
-  const settings = buildAdminSettings(await db.getAllSettings(database));
-  const pingTasks = await db.listPingTasks(database);
-  const offlineNotifications = await db.listOfflineNotifications(database);
-  const expiryNotifications = await db.listExpiryNotifications(database);
-  const loadNotifications = await db.listLoadNotifications(database);
-
-  return {
-    schema: BACKUP_SCHEMA_ID,
-    version: BACKUP_VERSION,
-    scope: BACKUP_SCOPE,
-    timestamp: new Date().toISOString(),
-    excluded: [...BACKUP_EXCLUDED_MODULES],
-    sensitive: true,
-    clients,
-    settings,
-    ping_tasks: pingTasks,
-    offline_notifications: offlineNotifications,
-    expiry_notifications: expiryNotifications,
-    load_notifications: loadNotifications,
-  };
 }
 
 function isQueryFlagEnabled(value: string | undefined): boolean {
@@ -1252,6 +1237,149 @@ async function runMaintenanceCleanup(database: db.QueryDatabase, username: strin
   await db.insertAuditLog(database, username, 'maintenance_cleanup', `手动维护清理完成: ${JSON.stringify(result)}`);
   return result;
 }
+
+type GitHubLatestRelease = {
+  tag_name?: unknown;
+  html_url?: unknown;
+  name?: unknown;
+  body?: unknown;
+  published_at?: unknown;
+};
+
+type GitHubBranch = {
+  name?: unknown;
+  commit?: {
+    sha?: unknown;
+    html_url?: unknown;
+    commit?: {
+      message?: unknown;
+      author?: {
+        date?: unknown;
+      };
+    };
+  };
+};
+
+function releaseString(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function updateSourceRepository(env: Bindings): string {
+  return env.UPDATE_SOURCE_REPOSITORY?.trim() || DEFAULT_UPDATE_SOURCE_REPOSITORY;
+}
+
+function updateSourceBranch(env: Bindings): string {
+  return env.UPDATE_SOURCE_BRANCH?.trim() || '';
+}
+
+async function fetchGitHubJson<T>(path: string): Promise<T> {
+  const response = await fetch(`https://api.github.com/${path}`, {
+    headers: {
+      'Accept': 'application/vnd.github+json',
+      'User-Agent': 'cf-vps-monitor-update-check',
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`GitHub API returned ${response.status}`);
+  }
+  return await response.json();
+}
+
+function fetchLatestRelease(repository: string): Promise<GitHubLatestRelease> {
+  return fetchGitHubJson<GitHubLatestRelease>(`repos/${repository}/releases/latest`);
+}
+
+function fetchBranch(repository: string, branch: string): Promise<GitHubBranch> {
+  return fetchGitHubJson<GitHubBranch>(`repos/${repository}/branches/${encodeURIComponent(branch)}`);
+}
+
+async function fetchBranchPackageVersion(repository: string, branch: string): Promise<string> {
+  const response = await fetch(branchPackageJsonUrl(repository, branch), {
+    headers: {
+      'Accept': 'application/json',
+      'User-Agent': 'cf-vps-monitor-update-check',
+    },
+  });
+  if (!response.ok) return '';
+  const data = await response.json() as { version?: unknown };
+  return typeof data.version === 'string' ? data.version.trim() : '';
+}
+
+async function buildReleaseUpdateResult(c: AdminContext, repository: string): Promise<UpdateCheckResult> {
+  const release = await fetchLatestRelease(repository);
+  const latestVersion = releaseString(release.tag_name) || 'dev';
+  const currentVersion = APP_VERSION;
+  const actionsUrl = workflowUrlFromRepositoryUrl(c.env.GITHUB_REPOSITORY_URL);
+  return {
+    current_version: currentVersion.startsWith('v') ? currentVersion : `v${currentVersion}`,
+    latest_version: latestVersion.startsWith('v') ? latestVersion : `v${latestVersion}`,
+    has_update: compareVersions(latestVersion, currentVersion) > 0,
+    release_url: releaseString(release.html_url),
+    actions_url: actionsUrl,
+    workflow_configured: Boolean(actionsUrl),
+    title: releaseString(release.name) || latestVersion,
+    body: releaseString(release.body),
+    published_at: releaseString(release.published_at),
+  };
+}
+
+async function buildBranchUpdateResult(c: AdminContext, repository: string, branch: string): Promise<UpdateCheckResult> {
+  const [branchData, latestPackageVersion] = await Promise.all([
+    fetchBranch(repository, branch),
+    fetchBranchPackageVersion(repository, branch).catch(() => ''),
+  ]);
+  const latestSha = normalizeGitSha(releaseString(branchData.commit?.sha));
+  const currentSha = normalizeGitSha(c.env.CURRENT_GIT_COMMIT);
+  const actionsUrl = workflowUrlFromRepositoryUrl(c.env.GITHUB_REPOSITORY_URL);
+  const commitUrl = releaseString(branchData.commit?.html_url) ||
+    `https://github.com/${repository}/tree/${encodeURIComponent(branch)}`;
+  const message = releaseString(branchData.commit?.commit?.message);
+  const publishedAt = releaseString(branchData.commit?.commit?.author?.date);
+  const latestDisplayVersion = latestPackageVersion
+    ? latestPackageVersion.startsWith('v') ? latestPackageVersion : `v${latestPackageVersion}`
+    : latestSha ? shortGitSha(latestSha) : branch;
+  const currentDisplayVersion = latestPackageVersion && currentSha && latestSha === currentSha
+    ? latestDisplayVersion
+    : APP_VERSION.startsWith('v') ? APP_VERSION : `v${APP_VERSION}`;
+  const shaSummary = latestSha ? `\n\n最新提交：${shortGitSha(latestSha)}${currentSha ? `\n当前部署：${shortGitSha(currentSha)}` : ''}` : '';
+  return {
+    current_version: currentDisplayVersion,
+    latest_version: latestDisplayVersion,
+    has_update: Boolean(latestSha && (!currentSha || latestSha !== currentSha)),
+    release_url: commitUrl,
+    actions_url: actionsUrl,
+    workflow_configured: Boolean(actionsUrl),
+    title: `${repository}@${branch}`,
+    body: `${message || `远程分支 ${branch} 的最新提交。`}${shaSummary}`,
+    published_at: publishedAt,
+  };
+}
+
+// ============ 系统更新 ============
+
+adminRoutes.get('/update-check', async (c) => {
+  const now = Date.now();
+  const repository = updateSourceRepository(c.env);
+  const branch = updateSourceBranch(c.env);
+  const cacheKey = `${repository}:${branch || 'release'}:${normalizeGitSha(c.env.CURRENT_GIT_COMMIT)}`;
+  const cached = updateCheckCache.get(cacheKey);
+  if (c.req.query('refresh') !== '1' && cached && cached.expiresAt > now) {
+    return c.json(cached.value);
+  }
+
+  try {
+    const result = branch
+      ? await buildBranchUpdateResult(c, repository, branch)
+      : await buildReleaseUpdateResult(c, repository);
+    updateCheckCache.set(cacheKey, { expiresAt: now + UPDATE_CHECK_CACHE_MS, value: result });
+    return c.json(result);
+  } catch (error) {
+    return c.json({
+      error: 'Update check failed',
+      detail: errorDetail(error),
+    }, 502);
+  }
+});
 
 // ============ 客户端管理 ============
 

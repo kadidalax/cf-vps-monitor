@@ -1,4 +1,4 @@
-import type { AuditLogsPage, BoundedTableRowCounts, ClearAllRecordsResult, Client, ClientCapacityCounts, ClientIdentity, ClientReferenceCleanupResult, ClientTokenMeta, ClientVisibility, DeleteClientsResult, DeleteOldRowsOptions, ExpiryNotification, ExpiryNotificationUpdate, GPUHistoryRecord, GPUInfo, HistoryTableRowCounts, LoadMetricWindowStats, LoadNotification, LoadNotificationInput, LoadNotificationMetric, LoginRateLimit, MonitorRecord, OfflineNotification, OfflineNotificationUpdate, OrphanClientDataCleanupResult, PingHistoryRecord, PingSnapshotInput, PingTask, PingTaskEstimateRow, PingTaskHistoryRequest, PublicClientRow, PublicWebsiteMonitor, ScheduledClientRow, TableRowCounts, Theme, ThemeAsset, ThemeAssetUpsertInput, ThemeUpsertInput, User, WebsiteCheck, WebsiteCheckInput, WebsiteMonitor, WebsiteMonitorInput } from '../types.ts';
+import type { AuditLogsPage, BoundedTableRowCounts, ClearAllRecordsResult, Client, ClientCapacityCounts, ClientIdentity, ClientReferenceCleanupResult, ClientTokenMeta, ClientVisibility, DeleteClientsResult, DeleteOldRowsOptions, DemoResetState, ExpiryNotification, ExpiryNotificationUpdate, GPUHistoryRecord, GPUInfo, HistoryTableRowCounts, LoadMetricWindowStats, LoadNotification, LoadNotificationInput, LoadNotificationMetric, LoginRateLimit, MonitorRecord, OfflineNotification, OfflineNotificationUpdate, OrphanClientDataCleanupResult, PingHistoryRecord, PingSnapshotInput, PingTask, PingTaskEstimateRow, PingTaskHistoryRequest, PublicClientRow, PublicWebsiteMonitor, ScheduledClientRow, TableRowCounts, Theme, ThemeAsset, ThemeAssetUpsertInput, ThemeUpsertInput, User, WebsiteCheck, WebsiteCheckInput, WebsiteMonitor, WebsiteMonitorInput } from '../types.ts';
 import type { BackupData } from '../../utils/backup.ts';
 import { redactDatabaseSecrets } from '../../utils/setup-diagnostics.ts';
 import { generateAgentToken, hashAgentToken } from '../../utils/client.ts';
@@ -996,7 +996,34 @@ export function clearSupabaseClientRecords(env: SupabaseApiEnv, client: string):
 }
 
 export function restoreSupabaseBackupData(env: SupabaseApiEnv, backup: BackupData): Promise<void> {
-  return callSupabaseRpc<void>(env, 'cfm_restore_backup_data', { input_backup: backup });
+  return callSupabaseRpc<void>(env, 'cfm_restore_demo_snapshot', { input_backup: backup });
+}
+
+export function getSupabaseDemoResetState(env: SupabaseApiEnv): Promise<DemoResetState | null> {
+  return callSupabaseRpc<DemoResetState | null>(env, 'cfm_demo_reset_state');
+}
+
+export function getSupabaseDemoSnapshot(env: SupabaseApiEnv): Promise<BackupData | null> {
+  return callSupabaseRpc<BackupData | null>(env, 'cfm_demo_snapshot');
+}
+
+export function saveSupabaseDemoSnapshot(env: SupabaseApiEnv, snapshot: BackupData): Promise<void> {
+  return callSupabaseRpc<void>(env, 'cfm_save_demo_snapshot', { input_snapshot: snapshot });
+}
+
+export function markSupabaseDemoResetRestored(env: SupabaseApiEnv, restoredAt: string): Promise<void> {
+  return callSupabaseRpc<void>(env, 'cfm_mark_demo_reset_restored', { input_restored_at: restoredAt });
+}
+
+export function resetSupabaseAdminUsers(
+  env: SupabaseApiEnv,
+  user: { uuid: string; username: string; hashedPassword: string },
+): Promise<void> {
+  return callSupabaseRpc<void>(env, 'cfm_reset_admin_users', {
+    input_uuid: user.uuid,
+    input_username: user.username,
+    input_passwd: user.hashedPassword,
+  });
 }
 
 export function insertSupabaseAuditLog(

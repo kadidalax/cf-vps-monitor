@@ -5,6 +5,7 @@ import type {
   LoadNotificationMetric,
   OfflineNotification,
   PingTask,
+  WebsiteMonitor,
 } from '../db/queries.ts';
 import { sanitizeSettingsForStorage } from '../settings/schema.ts';
 import { validatePingTaskInput } from './ping-task.ts';
@@ -59,6 +60,7 @@ export interface BackupData {
   offline_notifications?: OfflineNotification[];
   expiry_notifications?: ExpiryNotification[];
   load_notifications?: LoadNotification[];
+  website_monitors?: WebsiteMonitor[];
 }
 
 export interface EncryptedBackupData {
@@ -86,6 +88,7 @@ export interface BackupSummary {
   offline_notifications: number;
   expiry_notifications: number;
   load_notifications: number;
+  website_monitors: number;
 }
 
 export type BackupValidationResult =
@@ -650,5 +653,6 @@ export function summarizeBackup(backup: BackupData): BackupSummary {
     offline_notifications: backup.offline_notifications?.length || 0,
     expiry_notifications: backup.expiry_notifications?.length || 0,
     load_notifications: backup.load_notifications?.length || 0,
+    website_monitors: backup.website_monitors?.length || 0,
   };
 }

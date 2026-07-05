@@ -1,0 +1,47 @@
+name: Update from upstream
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to update
+        required: false
+        default: ''
+      upstream_repository:
+        description: Upstream repository
+        required: false
+        default: kadidalax/cf-vps-monitor
+      upstream_branch:
+        description: Upstream branch
+        required: false
+        default: main
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.branch }}
+
+      - name: Sync from upstream
+        run: |
+          set -euo pipefail
+          target_branch="${{ inputs.branch }}"
+          upstream_repository="${{ inputs.upstream_repository }}"
+          upstream_branch="${{ inputs.upstream_branch }}"
+          if [ -z "$target_branch" ]; then
+            target_branch="${GITHUB_REF_NAME}"
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${upstream_repository}.git" || true
+          git fetch upstream "$upstream_branch"
+          git checkout "$target_branch"
+          git reset --hard "upstream/${upstream_branch}"
+          git push --force origin "$target_branch"

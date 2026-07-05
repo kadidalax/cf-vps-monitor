@@ -153,6 +153,11 @@ export interface LoginRateLimit {
   locked_until: string | null;
 }
 
+export interface DemoResetState {
+  snapshot_exists: boolean;
+  last_restored_at: string | null;
+}
+
 export interface AuditLogEntry {
   id?: number;
   time: string;

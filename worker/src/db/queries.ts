@@ -647,6 +647,29 @@ export async function restoreBackupData(database: QueryDatabase, backup: BackupD
   return sba.restoreSupabaseBackupData(database.env, backup);
 }
 
+export async function getDemoResetState(database: QueryDatabase): Promise<t.DemoResetState | null> {
+  return sba.getSupabaseDemoResetState(database.env);
+}
+
+export async function getDemoSnapshot(database: QueryDatabase): Promise<BackupData | null> {
+  return sba.getSupabaseDemoSnapshot(database.env);
+}
+
+export async function saveDemoSnapshot(database: QueryDatabase, snapshot: BackupData): Promise<void> {
+  return sba.saveSupabaseDemoSnapshot(database.env, snapshot);
+}
+
+export async function markDemoResetRestored(database: QueryDatabase, restoredAt: string): Promise<void> {
+  return sba.markSupabaseDemoResetRestored(database.env, restoredAt);
+}
+
+export async function resetAdminUsers(
+  database: QueryDatabase,
+  user: { uuid: string; username: string; hashedPassword: string },
+): Promise<void> {
+  return sba.resetSupabaseAdminUsers(database.env, user);
+}
+
 export async function insertAuditLog(
   database: QueryDatabase,
   user: string,

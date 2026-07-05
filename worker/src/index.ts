@@ -5,7 +5,7 @@
 
 import { Hono } from 'hono';
 import type { Context } from 'hono';
-import workerPackage from '../package.json';
+import { APP_VERSION } from './utils/app-version';
 
 // 路由模块
 import { publicRoutes } from './routes/public';
@@ -51,6 +51,10 @@ type RuntimeBindings = {
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
   SETUP_DIAGNOSTICS_ENABLED?: string;
+  GITHUB_REPOSITORY_URL?: string;
+  UPDATE_SOURCE_REPOSITORY?: string;
+  UPDATE_SOURCE_BRANCH?: string;
+  CURRENT_GIT_COMMIT?: string;
 };
 
 // Wrangler owns configured bindings; this adds runtime-only optional values.
@@ -67,7 +71,7 @@ export type Variables = {
 };
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
-const BUNDLED_VERSION = workerPackage.version?.trim() || 'dev';
+const BUNDLED_VERSION = APP_VERSION;
 const CSRF_REJECTION_AUDIT_THROTTLE_MS = 60_000;
 const CSRF_REJECTION_AUDIT_THROTTLE_MAX_ENTRIES = 512;
 const ADMIN_SESSION_EDGE_CACHE_SECONDS = 30;
