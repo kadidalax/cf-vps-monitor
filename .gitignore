@@ -22,6 +22,7 @@ worker/.wrangler/
 supabase/.temp/
 
 # Test and preview artifacts
+AI_RELEASE_STATE.md
 frontend/tests/
 worker/tests/
 .tmp/
