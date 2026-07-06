@@ -1,8 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
-import { useLocation } from 'react-router-dom';
 import { getSessionStorageItem, removeSessionStorageItem, setSessionStorageItem } from '../utils/browserStorage';
 import { API_BASE, CSRF_COOKIE_NAME, buildApiRequest, readCookie } from '../utils/api';
-import { normalizeAuthUser, shouldClearAuthForStatus, type User } from './auth-state';
+import { normalizeAuthUser, shouldCheckAdminSessionOnLoad, shouldClearAuthForStatus, type User } from './auth-state';
 
 interface AuthContextType {
   user: User | null;
@@ -48,8 +47,7 @@ function clearStoredUser(): void {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const initialUser = readStoredUser();
   const [user, setUser] = useState<User | null>(initialUser);
-  const [authLoading, setAuthLoading] = useState(!initialUser);
-  const location = useLocation();
+  const [authLoading, setAuthLoading] = useState(true);
 
   const clearAuth = useCallback(() => {
     clearStoredUser();
@@ -58,15 +56,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let cancelled = false;
-    const pathname = location.pathname;
-    const shouldCheckSession = pathname.startsWith('/admin') || pathname === '/login';
+    const pathname = typeof window === 'undefined' ? '/' : window.location.pathname;
+    const shouldCheckSession = shouldCheckAdminSessionOnLoad(pathname);
     if (!shouldCheckSession) {
       setAuthLoading(false);
       return () => {
         cancelled = true;
       };
     }
-    if (!user) setAuthLoading(true);
+    setAuthLoading(true);
 
     fetch(`${API_BASE}/me`, {
       credentials: 'same-origin',
@@ -97,7 +95,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [clearAuth, location.pathname]);
+  }, [clearAuth]);
 
   const login = useCallback(async (username: string, password: string): Promise<string | null> => {
     try {

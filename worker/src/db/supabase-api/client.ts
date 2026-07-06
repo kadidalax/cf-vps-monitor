@@ -782,22 +782,28 @@ export function getSupabasePublicWebsites(
   env: SupabaseApiEnv,
   periodHours: number,
   checkLimit: number,
+  includeHidden = false,
+  fetcher: typeof fetch = fetch,
 ): Promise<PublicWebsiteMonitor[]> {
   return callSupabaseRpc<PublicWebsiteMonitor[]>(env, 'cfm_public_websites', {
     period_hours: periodHours,
     check_limit: checkLimit,
-  });
+    input_include_hidden: includeHidden,
+  }, fetcher);
 }
 
 export function getSupabasePublicWebsiteMonitorById(
   env: SupabaseApiEnv,
   id: number,
   checkLimit: number,
+  includeHidden = false,
+  fetcher: typeof fetch = fetch,
 ): Promise<PublicWebsiteMonitor | null> {
   return callSupabaseRpc<PublicWebsiteMonitor | null>(env, 'cfm_public_website_monitor', {
     input_id: id,
     input_check_limit: checkLimit,
-  });
+    input_include_hidden: includeHidden,
+  }, fetcher);
 }
 
 export function listSupabaseWebsiteMonitors(env: SupabaseApiEnv): Promise<WebsiteMonitor[]> {

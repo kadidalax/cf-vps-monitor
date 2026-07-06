@@ -2449,7 +2449,7 @@ as $$
   from monitor_rows m;
 $$;
 
-create or replace function public.cfm_public_website_monitor(input_id integer, input_check_limit integer default 120)
+create or replace function public.cfm_public_website_monitor(input_id integer, input_check_limit integer default 120, input_include_hidden boolean default false)
 returns jsonb
 language plpgsql
 stable
@@ -2467,7 +2467,7 @@ begin
         last_status_code, last_raw_status_code, last_latency_ms, last_effective_reason
       from website_monitors
       where id = input_id
-        and hidden = false
+        and (input_include_hidden or hidden = false)
       limit 1
     ),
     check_rows as (
@@ -3250,6 +3250,11 @@ revoke all on function public.cfm_public_website_monitor(integer, integer) from 
 revoke all on function public.cfm_public_website_monitor(integer, integer) from anon;
 revoke all on function public.cfm_public_website_monitor(integer, integer) from authenticated;
 grant execute on function public.cfm_public_website_monitor(integer, integer) to service_role;
+
+revoke all on function public.cfm_public_website_monitor(integer, integer, boolean) from public;
+revoke all on function public.cfm_public_website_monitor(integer, integer, boolean) from anon;
+revoke all on function public.cfm_public_website_monitor(integer, integer, boolean) from authenticated;
+grant execute on function public.cfm_public_website_monitor(integer, integer, boolean) to service_role;
 
 revoke all on function public.cfm_website_monitors() from public;
 revoke all on function public.cfm_website_monitors() from anon;
@@ -4104,7 +4109,7 @@ alter table website_checks drop constraint if exists website_checks_source_clien
 alter table website_checks add constraint website_checks_source_client_fkey foreign key (source_client) references clients(uuid) on delete set null;
 create index if not exists idx_website_checks_monitor_source_time on website_checks(monitor_id, source_type, source_client, checked_at desc);
 
-create or replace function public.cfm_public_websites(period_hours int default 24, check_limit int default 120)
+create or replace function public.cfm_public_websites(period_hours int default 24, check_limit int default 120, input_include_hidden boolean default false)
 returns jsonb
 language sql
 stable
@@ -4120,7 +4125,7 @@ as $$
       id, name, url, interval_sec, status, last_checked_at,
       last_status_code, last_raw_status_code, last_latency_ms, last_effective_reason
     from website_monitors
-    where hidden = false
+    where input_include_hidden or hidden = false
     order by sort_order asc, id asc
   ),
   check_rows as (
@@ -4137,7 +4142,7 @@ as $$
       from website_checks wc
       join website_monitors wm on wm.id = wc.monitor_id
       cross join args a
-      where wm.hidden = false
+      where (input_include_hidden or wm.hidden = false)
         and wc.checked_at >= now() - (a.safe_hours * interval '1 hour')
         and (
           wc.source_type = 'worker'
@@ -4160,7 +4165,7 @@ as $$
   from monitor_rows m;
 $$;
 
-create or replace function public.cfm_public_website_monitor(input_id integer, input_check_limit integer default 120)
+create or replace function public.cfm_public_website_monitor(input_id integer, input_check_limit integer default 120, input_include_hidden boolean default false)
 returns jsonb
 language plpgsql
 stable
@@ -4178,7 +4183,7 @@ begin
         last_status_code, last_raw_status_code, last_latency_ms, last_effective_reason
       from website_monitors
       where id = input_id
-        and hidden = false
+        and (input_include_hidden or hidden = false)
       limit 1
     ),
     check_rows as (
@@ -4375,10 +4380,20 @@ revoke all on function public.cfm_public_websites(integer, integer) from anon;
 revoke all on function public.cfm_public_websites(integer, integer) from authenticated;
 grant execute on function public.cfm_public_websites(integer, integer) to service_role;
 
+revoke all on function public.cfm_public_websites(integer, integer, boolean) from public;
+revoke all on function public.cfm_public_websites(integer, integer, boolean) from anon;
+revoke all on function public.cfm_public_websites(integer, integer, boolean) from authenticated;
+grant execute on function public.cfm_public_websites(integer, integer, boolean) to service_role;
+
 revoke all on function public.cfm_public_website_monitor(integer, integer) from public;
 revoke all on function public.cfm_public_website_monitor(integer, integer) from anon;
 revoke all on function public.cfm_public_website_monitor(integer, integer) from authenticated;
 grant execute on function public.cfm_public_website_monitor(integer, integer) to service_role;
+
+revoke all on function public.cfm_public_website_monitor(integer, integer, boolean) from public;
+revoke all on function public.cfm_public_website_monitor(integer, integer, boolean) from anon;
+revoke all on function public.cfm_public_website_monitor(integer, integer, boolean) from authenticated;
+grant execute on function public.cfm_public_website_monitor(integer, integer, boolean) to service_role;
 
 revoke all on function public.cfm_record_website_check(jsonb) from public;
 revoke all on function public.cfm_record_website_check(jsonb) from anon;
@@ -4479,7 +4494,7 @@ notify pgrst, 'reload schema';
 -- Source: 20260702010000_public_website_order.sql
 set local search_path = public;
 
-create or replace function public.cfm_public_websites(period_hours int default 24, check_limit int default 120)
+create or replace function public.cfm_public_websites(period_hours int default 24, check_limit int default 120, input_include_hidden boolean default false)
 returns jsonb
 language sql
 stable
@@ -4496,7 +4511,7 @@ as $$
       last_status_code, last_raw_status_code, last_latency_ms, last_effective_reason,
       sort_order
     from website_monitors
-    where hidden = false
+    where input_include_hidden or hidden = false
     order by sort_order asc, id asc
   ),
   check_rows as (
@@ -4513,7 +4528,7 @@ as $$
       from website_checks wc
       join website_monitors wm on wm.id = wc.monitor_id
       cross join args a
-      where wm.hidden = false
+      where (input_include_hidden or wm.hidden = false)
         and wc.checked_at >= now() - (a.safe_hours * interval '1 hour')
         and (
           wc.source_type = 'worker'
@@ -4541,6 +4556,11 @@ revoke all on function public.cfm_public_websites(integer, integer) from public;
 revoke all on function public.cfm_public_websites(integer, integer) from anon;
 revoke all on function public.cfm_public_websites(integer, integer) from authenticated;
 grant execute on function public.cfm_public_websites(integer, integer) to service_role;
+
+revoke all on function public.cfm_public_websites(integer, integer, boolean) from public;
+revoke all on function public.cfm_public_websites(integer, integer, boolean) from anon;
+revoke all on function public.cfm_public_websites(integer, integer, boolean) from authenticated;
+grant execute on function public.cfm_public_websites(integer, integer, boolean) to service_role;
 
 insert into settings (key, value)
 values ('schema_bootstrap_version', 'postgres-2026-07-02-public-website-order')

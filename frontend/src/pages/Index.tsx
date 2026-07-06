@@ -91,11 +91,19 @@ function applyPublicClientUpdate(current: ClientInfo[], detail: PublicDataUpdate
   return mergePublicClientPatch(current, detail, { includeHidden });
 }
 
-function normalizeWebsiteSummary(input: unknown): WebsiteMonitorSummary | null {
+function readWebsiteHidden(value: unknown): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') return value === 'true' || value === '1';
+  return false;
+}
+
+function normalizeWebsiteSummary(input: unknown, options: { includeHidden?: boolean } = {}): WebsiteMonitorSummary | null {
   if (!input || typeof input !== 'object') return null;
   const value = input as Partial<WebsiteMonitorSummary> & { hidden?: unknown };
   const id = Number(value.id);
-  if (!Number.isInteger(id) || id <= 0 || value.hidden === true) return null;
+  const hidden = readWebsiteHidden(value.hidden);
+  if (!Number.isInteger(id) || id <= 0 || (!options.includeHidden && hidden)) return null;
   return {
     id,
     name: String(value.name || ''),
@@ -107,25 +115,27 @@ function normalizeWebsiteSummary(input: unknown): WebsiteMonitorSummary | null {
     last_raw_status_code: typeof value.last_raw_status_code === 'number' ? value.last_raw_status_code : null,
     last_latency_ms: typeof value.last_latency_ms === 'number' ? value.last_latency_ms : null,
     last_effective_reason: typeof value.last_effective_reason === 'string' ? value.last_effective_reason : null,
+    hidden,
     checks: Array.isArray(value.checks) ? value.checks : [],
   };
 }
 
-function normalizeWebsiteSummaries(input: unknown): WebsiteMonitorSummary[] {
+function normalizeWebsiteSummaries(input: unknown, options: { includeHidden?: boolean } = {}): WebsiteMonitorSummary[] {
   return Array.isArray(input)
-    ? input.map(normalizeWebsiteSummary).filter((monitor): monitor is WebsiteMonitorSummary => Boolean(monitor))
+    ? input.map(item => normalizeWebsiteSummary(item, options)).filter((monitor): monitor is WebsiteMonitorSummary => Boolean(monitor))
     : [];
 }
 
 function applyWebsiteMonitorUpdate(
   current: WebsiteMonitorSummary[],
   detail?: WebsiteMonitorsUpdateDetail | true,
+  options: { includeHidden?: boolean } = {},
 ): WebsiteMonitorSummary[] | null {
   if (!detail || detail === true) return null;
   const remove = new Set((detail.remove || []).map(Number).filter((id) => Number.isInteger(id) && id > 0));
   const byId = new Map(current.filter((monitor) => !remove.has(monitor.id)).map((monitor) => [monitor.id, monitor]));
   for (const raw of detail.upsert || []) {
-    const normalized = normalizeWebsiteSummary(raw);
+    const normalized = normalizeWebsiteSummary(raw, options);
     if (!normalized) {
       const id = Number((raw as { id?: unknown } | null)?.id);
       if (Number.isInteger(id) && id > 0) byId.delete(id);
@@ -218,7 +228,7 @@ export function ApiUnavailableNotice({ error }: { error: string }) {
 
 export default function Index() {
   const location = useLocation();
-  const { isAuthenticated } = useAuth();
+  const { authLoading, isAuthenticated } = useAuth();
   const { liveData, error } = useLiveData();
   const monitorMode = new URLSearchParams(location.search).get('view') === 'websites' ? 'websites' : 'servers';
   const initialBootstrap = useMemo(() => getCachedPublicBootstrap(), []);
@@ -240,6 +250,12 @@ export default function Index() {
   // Load client list
   useEffect(() => {
     let cancelled = false;
+    if (authLoading) {
+      setClientsLoading(true);
+      return () => {
+        cancelled = true;
+      };
+    }
     if (monitorMode !== 'servers') {
       setClientsLoading(false);
       return () => {
@@ -319,10 +335,16 @@ export default function Index() {
       document.removeEventListener('visibilitychange', loadWhenVisible);
       window.clearInterval(timer);
     };
-  }, [monitorMode, isAuthenticated]);
+  }, [authLoading, monitorMode, isAuthenticated]);
 
   useEffect(() => {
     let cancelled = false;
+    if (authLoading) {
+      setWebsitesLoading(monitorMode === 'websites');
+      return () => {
+        cancelled = true;
+      };
+    }
     if (monitorMode !== 'websites') {
       setWebsitesLoading(false);
       return () => {
@@ -332,14 +354,14 @@ export default function Index() {
 
     const loadWebsites = (fresh = false) => {
       setWebsitesLoading(true);
-      const url = `/api/websites?hours=${websitePeriodHours}${fresh ? `&_fresh=${Date.now()}` : ''}`;
+      const url = `/api/websites?hours=${websitePeriodHours}${isAuthenticated ? '&include_hidden=1' : ''}${fresh ? `&_fresh=${Date.now()}` : ''}`;
       fetchWithBootstrapRetry(url, fresh ? { cache: 'reload' } : undefined)
         .then(res => {
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           return res.json();
         })
         .then(data => {
-          const list = normalizeWebsiteSummaries(data);
+          const list = normalizeWebsiteSummaries(data, { includeHidden: isAuthenticated });
           if (cancelled) return;
           setWebsites((current) => current.length > 0 && list.length === 0 ? current : list);
           setWebsitesError(null);
@@ -363,7 +385,7 @@ export default function Index() {
         return;
       }
       setWebsites((current) => {
-        const applied = applyWebsiteMonitorUpdate(current, detail);
+        const applied = applyWebsiteMonitorUpdate(current, detail, { includeHidden: isAuthenticated });
         if (!applied) return current;
         return applied;
       });
@@ -376,7 +398,7 @@ export default function Index() {
       document.removeEventListener('visibilitychange', loadWhenVisible);
       window.clearInterval(timer);
     };
-  }, [monitorMode, websitePeriodHours]);
+  }, [authLoading, isAuthenticated, monitorMode, websitePeriodHours]);
 
   // Normalize live data for the LiveDataMap type
   const liveMap: LiveDataMap = useMemo(() => {

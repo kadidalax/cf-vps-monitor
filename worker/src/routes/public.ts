@@ -1478,14 +1478,15 @@ publicRoutes.get('/task/ping', async (c) => {
 publicRoutes.get('/websites', async (c) => {
   const metrics: TimingMetric[] = [];
   const fresh = isFreshPublicMetadataRequest(c);
-  const cached = !fresh ? await getCachedPublicMetadataResponse(c, 'websites') : null;
+  const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
+  const cached = !fresh && !includeHidden ? await getCachedPublicMetadataResponse(c, 'websites') : null;
   if (cached) return cached;
   const limited = await guardPublicMetadata(c, 'websites');
   if (limited) return limited;
   const database = getDatabase(c.env);
   const periodHours = readIntParam(c.req.query('hours'), 24, 72);
-  const monitors = await timed(metrics, 'db_list_websites', () => db.listPublicWebsiteMonitors(database, 120, fresh, periodHours));
-  const response = setPublicMetadataResponse(c, monitors, !fresh);
+  const monitors = await timed(metrics, 'db_list_websites', () => db.listPublicWebsiteMonitors(database, 120, fresh, periodHours, includeHidden));
+  const response = includeHidden ? privateJsonResponse(monitors) : setPublicMetadataResponse(c, monitors, !fresh);
   response.headers.set('Server-Timing', metrics.map(metric => `${metric.name};dur=${metric.dur.toFixed(1)}`).join(', '));
   return response;
 });
@@ -1495,12 +1496,13 @@ publicRoutes.get('/websites/:id/checks', async (c) => {
   if (!Number.isInteger(id) || id <= 0) return c.json({ error: 'Not Found' }, 404);
   const limited = await guardPublicHistory(c, 'website-checks');
   if (limited) return limited;
+  const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
   const cacheKey = publicHistoryCacheKey(c, 'website-checks');
-  const cached = await getPublicHistoryCache(c, cacheKey);
+  const cached = includeHidden ? null : await getPublicHistoryCache(c, cacheKey);
   if (cached) return cached;
   const limit = readIntParam(c.req.query('limit'), 120, 500);
   const database = getDatabase(c.env);
-  const monitor = await db.getPublicWebsiteMonitorById(database, id, 1);
+  const monitor = await db.getPublicWebsiteMonitorById(database, id, 1, includeHidden);
   if (!monitor) return c.json({ error: 'Not Found' }, 404);
   const checks = (await db.listWebsiteChecks(database, id, limit)).map(check => ({
     checked_at: check.checked_at,
@@ -1511,20 +1513,21 @@ publicRoutes.get('/websites/:id/checks', async (c) => {
     raw_status_code: check.raw_status_code,
     latency_ms: check.latency_ms,
   }));
-  return setPublicHistoryCache(c, cacheKey, checks);
+  return includeHidden ? privateJsonResponse(checks) : setPublicHistoryCache(c, cacheKey, checks);
 });
 
 publicRoutes.get('/websites/:id', async (c) => {
   const id = Number(c.req.param('id'));
   if (!Number.isInteger(id) || id <= 0) return c.json({ error: 'Not Found' }, 404);
-  const cached = await getCachedPublicMetadataResponse(c, 'website-detail');
+  const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
+  const cached = includeHidden ? null : await getCachedPublicMetadataResponse(c, 'website-detail');
   if (cached) return cached;
   const limited = await guardPublicMetadata(c, 'website-detail');
   if (limited) return limited;
   const database = getDatabase(c.env);
-  const monitor = await db.getPublicWebsiteMonitorById(database, id, readIntParam(c.req.query('limit'), 120, 500));
+  const monitor = await db.getPublicWebsiteMonitorById(database, id, readIntParam(c.req.query('limit'), 120, 500), includeHidden);
   if (!monitor) return c.json({ error: 'Not Found' }, 404);
-  return setPublicMetadataResponse(c, monitor);
+  return includeHidden ? privateJsonResponse(monitor) : setPublicMetadataResponse(c, monitor);
 });
 
 // 节点信息（兼容旧版格式）

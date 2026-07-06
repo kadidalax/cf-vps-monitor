@@ -14,3 +14,7 @@ export function normalizeAuthUser(value: unknown): User | null {
 export function shouldClearAuthForStatus(status: number): boolean {
   return status === 401 || status === 403;
 }
+
+export function shouldCheckAdminSessionOnLoad(_pathname: string): boolean {
+  return true;
+}

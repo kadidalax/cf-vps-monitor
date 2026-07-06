@@ -17,6 +17,7 @@ export interface WebsiteMonitorSummary {
   last_raw_status_code?: number | null;
   last_latency_ms: number | null;
   last_effective_reason?: string | null;
+  hidden?: boolean;
   checks: WebsiteHeartbeatPoint[];
 }
 

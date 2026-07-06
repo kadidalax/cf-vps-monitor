@@ -215,8 +215,8 @@ interface LiveDataProviderProps {
 }
 
 export function LiveDataProvider({ children, enabled = true, viewer = true }: LiveDataProviderProps) {
-  const { isAuthenticated } = useAuth();
-  const includeHidden = isAuthenticated;
+  const { authLoading, isAuthenticated } = useAuth();
+  const includeHidden = !authLoading && isAuthenticated;
   const [liveData, setLiveData] = useState<LiveDataResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -277,6 +277,10 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
   }
 
   const fetchLiveData = useCallback(async () => {
+    if (authLoading) {
+      setLoading(true);
+      return;
+    }
     if (wsExpiredRef.current) {
       setLoading(false);
       return;
@@ -294,13 +298,17 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
     } finally {
       setLoading(false);
     }
-  }, [includeHidden]);
+  }, [authLoading, includeHidden]);
 
   const refresh = useCallback(() => {
     fetchLiveData();
   }, [fetchLiveData]);
 
   useEffect(() => {
+    if (authLoading) {
+      setLoading(true);
+      return;
+    }
     if (!enabled || !viewer) {
       setLoading(false);
       return;
@@ -374,9 +382,13 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
       window.removeEventListener(LIVE_POLL_SETTINGS_UPDATED_EVENT, handleSettingsUpdated);
       unsubscribePublicData();
     };
-  }, [enabled, includeHidden, viewer]);
+  }, [authLoading, enabled, includeHidden, viewer]);
 
   useEffect(() => {
+    if (authLoading) {
+      setLoading(true);
+      return;
+    }
     if (!enabled || !viewer) {
       setLoading(false);
       return;
@@ -551,7 +563,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
         ws.close();
       }
     };
-  }, [enabled, ensureFallbackViewerWindow, expireViewerSession, fetchLiveData, includeHidden, viewer]);
+  }, [authLoading, enabled, ensureFallbackViewerWindow, expireViewerSession, fetchLiveData, includeHidden, viewer]);
 
   // 轮询
   useEffect(() => {
@@ -566,6 +578,14 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
         timeoutRef.current = null;
       }
     };
+
+    if (authLoading) {
+      setLoading(true);
+      return () => {
+        cancelled = true;
+        clearPollTimeout();
+      };
+    }
 
     if (!enabled) {
       setLoading(false);
@@ -706,7 +726,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
       window.removeEventListener('keydown', handleUserActivity);
       window.removeEventListener('scroll', handleUserActivity);
     };
-  }, [enabled, ensureFallbackViewerWindow, expireViewerSession, fetchLiveData, viewer]);
+  }, [authLoading, enabled, ensureFallbackViewerWindow, expireViewerSession, fetchLiveData, viewer]);
 
   return (
     <LiveDataContext.Provider value={{ liveData, loading, error, viewerExpired, viewerExpiresAt, refresh }}>

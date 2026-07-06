@@ -287,12 +287,12 @@ export async function listWebsiteMonitors(database: QueryDatabase, _fresh = fals
   return sba.listSupabaseWebsiteMonitors(database.env);
 }
 
-export async function listPublicWebsiteMonitors(database: QueryDatabase, checkLimit: number = 60, _fresh = false, periodHours = 24): Promise<t.PublicWebsiteMonitor[]> {
-  return sba.getSupabasePublicWebsites(database.env, periodHours, checkLimit);
+export async function listPublicWebsiteMonitors(database: QueryDatabase, checkLimit: number = 60, _fresh = false, periodHours = 24, includeHidden = false): Promise<t.PublicWebsiteMonitor[]> {
+  return sba.getSupabasePublicWebsites(database.env, periodHours, checkLimit, includeHidden);
 }
 
-export async function getPublicWebsiteMonitorById(database: QueryDatabase, id: number, checkLimit: number = 120): Promise<t.PublicWebsiteMonitor | null> {
-  return sba.getSupabasePublicWebsiteMonitorById(database.env, id, checkLimit);
+export async function getPublicWebsiteMonitorById(database: QueryDatabase, id: number, checkLimit: number = 120, includeHidden = false): Promise<t.PublicWebsiteMonitor | null> {
+  return sba.getSupabasePublicWebsiteMonitorById(database.env, id, checkLimit, includeHidden);
 }
 
 export async function createWebsiteMonitor(database: QueryDatabase, monitor: t.WebsiteMonitorInput): Promise<t.WebsiteMonitor> {

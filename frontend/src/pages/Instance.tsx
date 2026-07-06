@@ -97,7 +97,7 @@ function historyQuery(params: Record<string, string | number | undefined>): stri
 export default function Instance() {
   const { uuid } = useParams<{ uuid: string }>();
   const navigate = useNavigate();
-  const { isAuthenticated } = useAuth();
+  const { authLoading, isAuthenticated } = useAuth();
   const [client, setClient] = useState<ClientInfo | null>(null);
   const [clients, setClients] = useState<ClientInfo[]>([]);
   const [records, setRecords] = useState<PublicMonitorRecord[]>([]);
@@ -142,7 +142,7 @@ export default function Instance() {
 
   // Load public client info.
   const loadClient = useCallback(async () => {
-    if (!uuid) return;
+    if (!uuid || authLoading) return;
     setClientLoading(true);
     try {
       setError(null);
@@ -153,13 +153,13 @@ export default function Instance() {
       if (found) { setClient(found); } else { setError('服务器不存在'); }
     } catch { setError('加载失败'); }
     finally { setClientLoading(false); }
-  }, [uuid, isAuthenticated]);
+  }, [uuid, authLoading, isAuthenticated]);
 
   useEffect(() => { loadClient(); }, [loadClient]);
 
   // Load history records
   const loadRecords = useCallback(async (range: TimeRange) => {
-    if (!uuid) return;
+    if (!uuid || authLoading) return;
     setRecordsLoading(true);
     const endTs = Date.now();
     const startTs = endTs - timeRangeMs[range];
@@ -173,7 +173,7 @@ export default function Instance() {
       setRecords(normalizePublicMonitorRecords(data));
     } catch {}
     setRecordsLoading(false);
-  }, [uuid, isAuthenticated]);
+  }, [uuid, authLoading, isAuthenticated]);
 
   useEffect(() => {
     loadRecords(timeRange);
@@ -205,7 +205,7 @@ export default function Instance() {
 
   // Load ping tasks and records only when the Ping card is near the viewport.
   useEffect(() => {
-    if (!uuid || !shouldLoadPing) return;
+    if (!uuid || authLoading || !shouldLoadPing) return;
     const controller = new AbortController();
     setPingSeries([]);
     setPingError(null);
@@ -226,11 +226,11 @@ export default function Instance() {
       });
 
     return () => controller.abort();
-  }, [shouldLoadPing, timeRange, uuid, isAuthenticated]);
+  }, [shouldLoadPing, timeRange, uuid, authLoading, isAuthenticated]);
 
   // Load GPU records (only for GPU-capable clients)
   useEffect(() => {
-    if (!uuid || !client?.gpu_name) return;
+    if (!uuid || authLoading || !client?.gpu_name) return;
     const endTs = Date.now();
     const startTs = endTs - timeRangeMs[timeRange];
     const start = new Date(startTs).toISOString();
@@ -239,7 +239,7 @@ export default function Instance() {
     publicFetch(`/records/gpu?${historyQuery({ uuid, start, end, cursor: end, limit: 200, include_hidden: isAuthenticated ? 1 : undefined })}`)
       .then((data) => setGpuRecords(normalizePublicGpuRecords(data)))
       .catch(() => {});
-  }, [uuid, timeRange, client?.gpu_name, isAuthenticated]);
+  }, [uuid, timeRange, client?.gpu_name, authLoading, isAuthenticated]);
 
   const handleTimeRangeChange = (v: string) => {
     const range = v as TimeRange;
