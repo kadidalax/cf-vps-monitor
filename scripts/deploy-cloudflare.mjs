@@ -21,6 +21,11 @@ function runWrangler(args, options = {}) {
   });
 }
 
+function currentGitCommit() {
+  const result = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' });
+  return result.status === 0 ? result.stdout.trim() : '';
+}
+
 function fail(message) {
   console.error(message);
   process.exit(1);
@@ -44,7 +49,11 @@ function resolveSupabaseUrl({ allowDryRunFallback = false } = {}) {
 function writeDeployConfig() {
   const source = readFileSync(sourceConfig, 'utf8');
   const supabaseUrl = resolveSupabaseUrl({ allowDryRunFallback: isDryRun });
+  const commit = currentGitCommit();
   let generated = source.replace(/SUPABASE_URL\s*=\s*"[^"]*"/, `SUPABASE_URL = "${supabaseUrl}"`);
+  generated = /\nCURRENT_GIT_COMMIT\s*=/.test(generated)
+    ? generated.replace(/CURRENT_GIT_COMMIT\s*=\s*"[^"]*"/, `CURRENT_GIT_COMMIT = "${commit}"`)
+    : generated.replace(/(\[vars\]\s*)/, `$1\nCURRENT_GIT_COMMIT = "${commit}"\n`);
   generated = generated
     .replace('main = "worker/src/index.ts"', 'main = "../src/index.ts"')
     .replace('directory = "frontend/dist"', 'directory = "../../frontend/dist"');

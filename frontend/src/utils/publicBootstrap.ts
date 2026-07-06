@@ -47,7 +47,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function normalizePublicBootstrap(payload: unknown, options: { includeHidden?: boolean } = {}): PublicBootstrapPayload {
   const record = asRecord(payload);
   if (!record) throw new Error('Invalid public bootstrap response');
-  return applyStoredClientPatch({
+  const normalized = {
     settings: record.settings === undefined ? undefined : normalizePublicSettings(record.settings) || undefined,
     clients: record.clients === undefined ? undefined : normalizePublicClients(record.clients, options),
     nodes: record.nodes === undefined ? undefined : normalizePublicClients(record.nodes, options),
@@ -55,7 +55,8 @@ function normalizePublicBootstrap(payload: unknown, options: { includeHidden?: b
     metadata_version: typeof record.metadata_version === 'string' ? record.metadata_version : undefined,
     snapshot_at: typeof record.snapshot_at === 'number' && Number.isFinite(record.snapshot_at) ? record.snapshot_at : undefined,
     server_time: typeof record.server_time === 'number' && Number.isFinite(record.server_time) ? record.server_time : undefined,
-  });
+  };
+  return options.includeHidden ? normalized : applyStoredClientPatch(normalized);
 }
 
 function readClientPatch(): PublicBootstrapClientPatch | null {

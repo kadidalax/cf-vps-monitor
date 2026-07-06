@@ -493,7 +493,7 @@ function privateJsonResponse(value: unknown): Response {
   });
 }
 
-async function hasAdminSession(c: PublicContext): Promise<boolean> {
+export async function hasAdminSession(c: PublicContext): Promise<boolean> {
   const token = getAdminSessionToken(c);
   if (!token) return false;
   try {
@@ -1261,7 +1261,7 @@ publicRoutes.get('/public/bootstrap', async (c) => {
     getPublicClientsSnapshot(c, getDatabase(c.env), fresh, includeHidden),
     c.env.LIVE_DATA
       .get(c.env.LIVE_DATA.idFromName('global'))
-      .fetch(new Request('https://do/live', { method: 'GET' }))
+      .fetch(new Request(`https://do/live${includeHidden ? '?include_hidden=1' : ''}`, { method: 'GET' }))
       .then(response => readLiveSnapshot(response))
       .then(snapshot => snapshot ?? { online: [], count: 0 }),
   ]);
@@ -1542,13 +1542,19 @@ publicRoutes.get('/nodes', async (c) => {
 publicRoutes.get('/live', async (c) => {
   const limited = await guardPublicLive(c);
   if (limited) return limited;
-  const cached = await getPublicEdgeCache(c, PUBLIC_LIVE_CACHE_SECONDS);
+  const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
+  const cached = includeHidden ? null : await getPublicEdgeCache(c, PUBLIC_LIVE_CACHE_SECONDS);
   if (cached) return cached;
 
   const doId = c.env.LIVE_DATA.idFromName('global');
   const stub = c.env.LIVE_DATA.get(doId);
-  const response = withPublicCacheHeader(c, await stub.fetch(c.req.raw), PUBLIC_LIVE_CACHE_SECONDS, 'miss');
-  putPublicEdgeCache(c, response);
+  const doUrl = new URL(c.req.url);
+  if (includeHidden) doUrl.searchParams.set('include_hidden', '1');
+  else doUrl.searchParams.delete('include_hidden');
+  const response = includeHidden
+    ? privateJsonResponse(await (await stub.fetch(new Request(doUrl.toString(), c.req.raw))).json())
+    : withPublicCacheHeader(c, await stub.fetch(new Request(doUrl.toString(), c.req.raw)), PUBLIC_LIVE_CACHE_SECONDS, 'miss');
+  if (!includeHidden) putPublicEdgeCache(c, response);
   return response;
 });
 

@@ -152,6 +152,17 @@ function clientNumberField(source: Record<string, unknown>, key: string): number
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
+function clientBooleanField(source: Record<string, unknown>, key: string): boolean {
+  const value = source[key];
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    return normalized === 'true' || normalized === '1';
+  }
+  return false;
+}
+
 function normalizeLiveAgentAuthClient(value: unknown): db.Client | null {
   if (!isJsonObjectPayload(value)) return null;
   const uuid = clientStringField(value, 'uuid').trim();
@@ -183,12 +194,12 @@ function normalizeLiveAgentAuthClient(value: unknown): db.Client | null {
     version: clientStringField(value, 'version'),
     price: clientNumberField(value, 'price'),
     billing_cycle: clientNumberField(value, 'billing_cycle'),
-    auto_renewal: value.auto_renewal === true,
+    auto_renewal: clientBooleanField(value, 'auto_renewal'),
     currency: clientStringField(value, 'currency'),
     expired_at: clientStringField(value, 'expired_at'),
     group: clientStringField(value, 'group'),
     tags: clientStringField(value, 'tags'),
-    hidden: value.hidden === true,
+    hidden: clientBooleanField(value, 'hidden'),
     traffic_limit: clientNumberField(value, 'traffic_limit'),
     traffic_limit_type: clientStringField(value, 'traffic_limit_type') || 'sum',
     sort_order: typeof value.sort_order === 'number' && Number.isFinite(value.sort_order) ? value.sort_order : undefined,
@@ -746,7 +757,7 @@ async function syncLiveBasicInfoMetadata(c: ClientContext, client: Record<string
       client,
       uuid,
       name: typeof client.name === 'string' ? client.name : uuid,
-      hidden: client.hidden === true,
+      hidden: clientBooleanField(client, 'hidden'),
     }),
   }));
 }

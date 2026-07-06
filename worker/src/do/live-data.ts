@@ -193,6 +193,17 @@ function numberField(source: JsonObject, key: string): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
+function booleanField(source: JsonObject, key: string): boolean {
+  const value = source[key];
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    return normalized === 'true' || normalized === '1';
+  }
+  return false;
+}
+
 function normalizeAgentAuthSnapshot(value: unknown): AgentAuthSnapshot | null {
   if (!isObjectPayload(value)) return null;
   const uuid = stringField(value, 'uuid').trim();
@@ -224,12 +235,12 @@ function normalizeAgentAuthSnapshot(value: unknown): AgentAuthSnapshot | null {
     version: stringField(value, 'version'),
     price: numberField(value, 'price'),
     billing_cycle: numberField(value, 'billing_cycle'),
-    auto_renewal: value.auto_renewal === true,
+    auto_renewal: booleanField(value, 'auto_renewal'),
     currency: stringField(value, 'currency'),
     expired_at: stringField(value, 'expired_at'),
     group: stringField(value, 'group'),
     tags: stringField(value, 'tags'),
-    hidden: value.hidden === true,
+    hidden: booleanField(value, 'hidden'),
     traffic_limit: numberField(value, 'traffic_limit'),
     traffic_limit_type: stringField(value, 'traffic_limit_type') || 'sum',
     created_at: stringField(value, 'created_at'),
@@ -342,6 +353,7 @@ interface SessionAttachment {
   clientId: string;
   clientName: string;
   hidden: boolean;
+  includeHidden?: boolean;
   viewerIp?: string;
   viewerExpiresAt?: number;
   sourceIp?: string;
@@ -439,6 +451,7 @@ export class LiveDataDO {
         ? value.clientName
         : value.clientId,
       hidden: Boolean(value.hidden),
+      includeHidden: Boolean(value.includeHidden),
       viewerIp: typeof value.viewerIp === 'string' && value.viewerIp.trim() !== ''
         ? value.viewerIp
         : undefined,
@@ -543,10 +556,10 @@ export class LiveDataDO {
     return safeReport as MonitorReportPayload;
   }
 
-  private buildSnapshot(): LiveSnapshot {
+  private buildSnapshot(includeHidden = false): LiveSnapshot {
     const now = Date.now();
     const onlineClients = Array.from(this.clients.values())
-      .filter(c => !c.hidden && (!c.expiresAt || c.expiresAt > now))
+      .filter(c => (includeHidden || !c.hidden) && (!c.expiresAt || c.expiresAt > now))
       .map(c => ({
         ...(c.lastReport || {}),
         uuid: c.uuid,
@@ -571,20 +584,21 @@ export class LiveDataDO {
     return snapshot;
   }
 
-  private async buildSnapshotWithMetadataVersion(): Promise<LiveSnapshot> {
+  private async buildSnapshotWithMetadataVersion(includeHidden = false): Promise<LiveSnapshot> {
     if (this.adminClientsUpdatedAt === null) {
       const snapshot = await this.readAdminClientsSnapshot();
       this.adminClientsUpdatedAt = snapshot?.updatedAt || 0;
     }
-    return this.buildSnapshot();
+    return this.buildSnapshot(includeHidden);
   }
 
   private sendSnapshot(ws: WebSocket) {
     if (ws.readyState !== WebSocket.READY_STATE_OPEN) return;
+    const includeHidden = this.getSessionAttachment(ws)?.includeHidden === true;
     try {
       ws.send(JSON.stringify({
         type: 'snapshot',
-        ...this.buildSnapshot(),
+        ...this.buildSnapshot(includeHidden),
       }));
     } catch (error) {
       // Viewer snapshots are best effort; HTTP fallback will retry.
@@ -624,20 +638,20 @@ export class LiveDataDO {
     if (ws) this.rememberAgentReportAttachment(ws, clientId, clientName, hidden, report, now, expiresAt);
     this.runBackground('do_live_network_metadata', this.syncNetworkMetadataFromReport(clientId, clientName, hidden, report, now));
 
-    if (this.isVisibleClient(next, now)) {
+    if (this.isVisibleClient(next, now) || next.hidden) {
       this.broadcastToViewers({
         type: 'update',
         client: clientId,
         name: clientName,
         data: report,
         timestamp: now,
-      });
+      }, next.hidden ? 'admin' : 'all');
     } else if (wasVisible) {
       this.broadcastToViewers({
         type: 'remove',
         client: clientId,
         timestamp: now,
-      });
+      }, 'public');
     }
 
     return report;
@@ -704,14 +718,14 @@ export class LiveDataDO {
     if (session && this.sessionRoles.get(clientId) === 'agent') {
       this.rememberAgentReportAttachment(session, clientId, current.name, current.hidden, nextReport, current.lastReportTime, current.expiresAt);
     }
-    if (this.isVisibleClient(next, now)) {
+    if (this.isVisibleClient(next, now) || next.hidden) {
       this.broadcastToViewers({
         type: 'update',
         client: clientId,
         name: current.name,
         data: nextReport,
         timestamp: now,
-      });
+      }, next.hidden ? 'admin' : 'all');
     }
   }
 
@@ -943,15 +957,12 @@ export class LiveDataDO {
     for (const [uuid, client] of this.clients) {
       if (!client.expiresAt || client.expiresAt > now) continue;
 
-      const wasVisible = !client.hidden;
       this.clients.delete(uuid);
-      if (wasVisible) {
-        this.broadcastToViewers({
-          type: 'remove',
-          client: uuid,
-          timestamp: now,
-        });
-      }
+      this.broadcastToViewers({
+        type: 'remove',
+        client: uuid,
+        timestamp: now,
+      }, client.hidden ? 'admin' : 'all');
     }
 
   }
@@ -983,12 +994,15 @@ export class LiveDataDO {
     }
   }
 
-  private broadcastToViewers(message: JsonObject) {
+  private broadcastToViewers(message: JsonObject, audience: 'all' | 'public' | 'admin' = 'all') {
     let payload = '';
     for (const [id, session] of this.sessions) {
       if (this.sessionRoles.get(id) !== 'viewer' || session.readyState !== WebSocket.READY_STATE_OPEN) {
         continue;
       }
+      const includeHidden = this.getSessionAttachment(session)?.includeHidden === true;
+      if (audience === 'admin' && !includeHidden) continue;
+      if (audience === 'public' && includeHidden) continue;
       try {
         payload ||= JSON.stringify(message);
         session.send(payload);
@@ -1087,7 +1101,6 @@ export class LiveDataDO {
     if (this.sessions.get(attachment.clientId) !== ws) return;
 
     const existing = this.clients.get(attachment.clientId);
-    const wasVisible = existing ? !existing.hidden : false;
     this.sessions.delete(attachment.clientId);
     this.sessionRoles.delete(attachment.clientId);
     this.viewerExpiresAt.delete(attachment.clientId);
@@ -1095,12 +1108,12 @@ export class LiveDataDO {
     if (attachment.role !== 'agent') return;
 
     this.clients.delete(attachment.clientId);
-    if (wasVisible) {
+    if (existing) {
       this.broadcastToViewers({
         type: 'remove',
         client: attachment.clientId,
         timestamp: Date.now(),
-      });
+      }, existing.hidden ? 'admin' : 'all');
     }
   }
 
@@ -1159,7 +1172,7 @@ export class LiveDataDO {
     if (current) {
       const wasVisible = !current.hidden;
       current.name = typeof meta.name === 'string' ? meta.name : current.name;
-      current.hidden = Boolean(meta.hidden);
+      current.hidden = booleanField(meta, 'hidden');
       this.clients.set(uuid, current);
       const session = this.sessions.get(uuid);
       if (session?.readyState === WebSocket.READY_STATE_OPEN) {
@@ -1179,7 +1192,16 @@ export class LiveDataDO {
           type: 'remove',
           client: uuid,
           timestamp: Date.now(),
-        });
+        }, 'public');
+        if (current.lastReport) {
+          this.broadcastToViewers({
+            type: 'update',
+            client: uuid,
+            name: current.name,
+            data: current.lastReport,
+            timestamp: current.lastReportTime,
+          }, 'admin');
+        }
       } else if (!current.hidden && current.lastReport) {
         this.broadcastToViewers({
           type: 'update',
@@ -1187,16 +1209,16 @@ export class LiveDataDO {
           name: current.name,
           data: current.lastReport,
           timestamp: current.lastReportTime,
-        });
+        }, 'all');
       }
     }
     const client = isObjectPayload(meta.client)
       ? meta.client
-      : { uuid, name: current?.name || uuid, hidden: Boolean(meta.hidden) };
+      : { uuid, name: current?.name || uuid, hidden: booleanField(meta, 'hidden') };
     await this.upsertAdminClientSnapshot(client);
     const broadcastClient = this.publicClientMetadata(client);
     this.broadcastMetadataChanged({
-      clients: Boolean(meta.hidden)
+      clients: booleanField(meta, 'hidden')
         ? { upsert: [broadcastClient], remove: [uuid] }
         : { upsert: [broadcastClient] },
     });
@@ -1219,7 +1241,6 @@ export class LiveDataDO {
 
     const keepMetadata = meta.keepMetadata === true;
     const existing = this.clients.get(meta.uuid);
-    const wasVisible = existing ? !existing.hidden : false;
     const session = this.sessions.get(meta.uuid);
     if (session && session.readyState === WebSocket.READY_STATE_OPEN) {
       try {
@@ -1235,12 +1256,12 @@ export class LiveDataDO {
     if (!keepMetadata) {
       await this.removeAdminClientSnapshot(String(meta.uuid));
     }
-    if (wasVisible) {
+    if (existing) {
       this.broadcastToViewers({
         type: 'remove',
         client: meta.uuid,
         timestamp: Date.now(),
-      });
+      }, existing.hidden ? 'admin' : 'all');
     }
     if (!keepMetadata) {
       this.broadcastMetadataChanged({ clients: { remove: [String(meta.uuid)] } });
@@ -1354,7 +1375,7 @@ export class LiveDataDO {
     const now = Number.isFinite(Number(payload.timestamp)) ? Number(payload.timestamp) : Date.now();
     const ttlMs = this.boundedHttpTtlMs(payload.ttl_ms);
     const clientName = typeof payload.name === 'string' && payload.name.trim() !== '' ? payload.name.trim() : payload.uuid;
-    const hidden = Boolean(payload.hidden);
+    const hidden = booleanField(payload, 'hidden');
     const reportsToPersist: Array<{ report: JsonObject; reportTime: number }> = [];
     for (let index = 0; index < reports.length; index += 1) {
       const rawReport = reports[index];
@@ -1656,6 +1677,7 @@ export class LiveDataDO {
         hidden,
         ...(role === 'viewer' && viewerIp ? { viewerIp } : {}),
         ...(role === 'viewer' ? { viewerExpiresAt: now + normalizeViewerTtlMs(url.searchParams.get('viewer_ttl_ms')) } : {}),
+        ...(role === 'viewer' && (url.searchParams.get('include_hidden') === '1' || url.searchParams.get('include_hidden') === 'true') ? { includeHidden: true } : {}),
         ...(role === 'agent' && sourceIp && isPublicIpAddress(sourceIp) ? { sourceIp } : {}),
         ...(role === 'agent' && region && this.isUsefulRegion(region) ? { region } : {}),
       };
@@ -1683,7 +1705,8 @@ export class LiveDataDO {
 
     // HTTP GET - 获取缓存的实时数据
     if (request.method === 'GET') {
-      return new Response(JSON.stringify(await this.buildSnapshotWithMetadataVersion()), {
+      const includeHidden = url.searchParams.get('include_hidden') === '1' || url.searchParams.get('include_hidden') === 'true';
+      return new Response(JSON.stringify(await this.buildSnapshotWithMetadataVersion(includeHidden)), {
         headers: { 'Content-Type': 'application/json' },
       });
     }

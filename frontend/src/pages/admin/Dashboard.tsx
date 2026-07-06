@@ -884,7 +884,12 @@ export default function AdminDashboard() {
       toast.success(`已隐藏 ${result.updated ?? selectedNodes.length} 个节点`);
       setClients((prev) => prev.map((client) => selectedNodes.includes(client.uuid) ? { ...client, hidden: true } : client));
       setSelectedNodes([]);
-      notifyPublicDataUpdated({ clients: { remove: selectedNodes } });
+      notifyPublicDataUpdated({
+        clients: {
+          upsert: clients.filter((client) => selectedNodes.includes(client.uuid)).map((client) => ({ ...client, hidden: true })),
+          remove: selectedNodes,
+        },
+      });
     } catch (error) { toast.error(error instanceof Error ? error.message : '批量隐藏失败'); }
   };
 
@@ -1013,7 +1018,7 @@ export default function AdminDashboard() {
       {
         label: '对游客隐藏',
         value: String(hiddenCount),
-        detail: '不会出现在前台',
+        detail: '不会出现在游客前台',
         icon: <EyeOff size={18} />,
       },
     ];

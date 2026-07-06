@@ -6,6 +6,7 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { APP_VERSION } from './utils/app-version';
+import { shortGitSha } from './utils/update-check';
 
 // 路由模块
 import { publicRoutes } from './routes/public';
@@ -51,9 +52,6 @@ type RuntimeBindings = {
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
   SETUP_DIAGNOSTICS_ENABLED?: string;
-  GITHUB_REPOSITORY_URL?: string;
-  UPDATE_SOURCE_REPOSITORY?: string;
-  UPDATE_SOURCE_BRANCH?: string;
   CURRENT_GIT_COMMIT?: string;
 };
 
@@ -355,11 +353,12 @@ app.get('/ping', (c) => c.text('pong'));
 // 版本信息：面板版本固定为本次部署包内版本，不跟随 GitHub 最新 release 自动变化。
 app.get('/api/version', (c) => {
   const appVersion = BUNDLED_VERSION;
+  const gitCommit = shortGitSha(c.env.CURRENT_GIT_COMMIT);
   return c.json({
     version: appVersion,
     name: 'CF VPS Monitor',
-    hash: appVersion.replace(/^v/i, '') || 'dev',
-    build: `release-${appVersion}`,
+    hash: gitCommit || 'dev',
+    build: gitCommit || `release-${appVersion}`,
   });
 });
 

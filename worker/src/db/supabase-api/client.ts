@@ -77,6 +77,20 @@ function readRpcBoolean(value: unknown): boolean {
   return false;
 }
 
+function normalizeClientBooleans<T extends { hidden?: unknown; auto_renewal?: unknown } | null>(client: T): T {
+  if (!client || typeof client !== 'object') return client;
+  const record = client as Record<string, unknown>;
+  return {
+    ...client,
+    ...(Object.prototype.hasOwnProperty.call(record, 'hidden') ? { hidden: readRpcBoolean(record.hidden) } : {}),
+    ...(Object.prototype.hasOwnProperty.call(record, 'auto_renewal') ? { auto_renewal: readRpcBoolean(record.auto_renewal) } : {}),
+  } as T;
+}
+
+function normalizeClientList<T extends { hidden?: unknown; auto_renewal?: unknown }>(clients: T[]): T[] {
+  return clients.map(normalizeClientBooleans);
+}
+
 function readRpcStringArray(value: unknown): string[] {
   if (Array.isArray(value)) return value.filter((item): item is string => typeof item === 'string');
   if (typeof value !== 'string' || value.trim() === '') return [];
@@ -121,11 +135,11 @@ export function setSupabaseSettings(env: SupabaseApiEnv, settings: Record<string
 }
 
 export function getSupabasePublicClients(env: SupabaseApiEnv): Promise<PublicClientRow[]> {
-  return callSupabaseRpc<PublicClientRow[]>(env, 'cfm_public_clients');
+  return callSupabaseRpc<PublicClientRow[]>(env, 'cfm_public_clients').then(normalizeClientList);
 }
 
 export function getSupabaseAdminClients(env: SupabaseApiEnv): Promise<Client[]> {
-  return callSupabaseRpc<Client[]>(env, 'cfm_admin_clients');
+  return callSupabaseRpc<Client[]>(env, 'cfm_admin_clients').then(normalizeClientList);
 }
 
 export function supabaseClientExists(env: SupabaseApiEnv, uuid: string): Promise<boolean> {
@@ -133,11 +147,11 @@ export function supabaseClientExists(env: SupabaseApiEnv, uuid: string): Promise
 }
 
 export function getSupabaseClient(env: SupabaseApiEnv, uuid: string): Promise<Client | null> {
-  return callSupabaseRpc<Client | null>(env, 'cfm_client', { input_uuid: uuid });
+  return callSupabaseRpc<Client | null>(env, 'cfm_client', { input_uuid: uuid }).then(normalizeClientBooleans);
 }
 
 export function getSupabaseClientVisibility(env: SupabaseApiEnv, uuid: string): Promise<ClientVisibility | null> {
-  return callSupabaseRpc<ClientVisibility | null>(env, 'cfm_client_visibility', { input_uuid: uuid });
+  return callSupabaseRpc<ClientVisibility | null>(env, 'cfm_client_visibility', { input_uuid: uuid }).then(normalizeClientBooleans);
 }
 
 export function listSupabaseScheduledClientRows(env: SupabaseApiEnv): Promise<ScheduledClientRow[]> {
@@ -153,7 +167,7 @@ export function getSupabaseClientTokenMeta(env: SupabaseApiEnv, uuid: string): P
 }
 
 export function getSupabaseClientsByIds(env: SupabaseApiEnv, uuids: string[]): Promise<Client[]> {
-  return callSupabaseRpc<Client[]>(env, 'cfm_clients_by_ids', { input_uuids: uuids });
+  return callSupabaseRpc<Client[]>(env, 'cfm_clients_by_ids', { input_uuids: uuids }).then(normalizeClientList);
 }
 
 export function getSupabaseClientIds(env: SupabaseApiEnv): Promise<string[]> {
@@ -165,7 +179,7 @@ export async function getSupabaseClientByToken(env: SupabaseApiEnv, token: strin
   return callSupabaseRpc<Client | null>(env, 'cfm_agent_client_by_token', {
     input_token_hash: tokenHash,
     input_token: token,
-  });
+  }).then(normalizeClientBooleans);
 }
 
 export async function getSupabaseClientIdentityByToken(env: SupabaseApiEnv, token: string): Promise<ClientIdentity | null> {
@@ -173,7 +187,7 @@ export async function getSupabaseClientIdentityByToken(env: SupabaseApiEnv, toke
   return callSupabaseRpc<ClientIdentity | null>(env, 'cfm_agent_client_identity_by_token', {
     input_token_hash: tokenHash,
     input_token: token,
-  });
+  }).then(normalizeClientBooleans);
 }
 
 export async function supabaseClientTokenExists(env: SupabaseApiEnv, token: string): Promise<boolean> {
@@ -203,7 +217,7 @@ export async function createSupabaseClient(env: SupabaseApiEnv, client: Partial<
       token_hash: client.token_hash || await hashAgentToken(token),
       sort_order: client.sort_order,
     },
-  });
+  }).then(normalizeClientBooleans);
 }
 
 export function markSupabaseClientTokenUsed(env: SupabaseApiEnv, uuid: string, ip = ''): Promise<boolean> {
@@ -218,7 +232,7 @@ export async function rotateSupabaseClientToken(env: SupabaseApiEnv, uuid: strin
     input_uuid: uuid,
     input_token: token,
     input_token_hash: await hashAgentToken(token),
-  });
+  }).then(normalizeClientBooleans);
 }
 
 export function updateSupabaseClient(env: SupabaseApiEnv, uuid: string, data: Partial<Client> | Record<string, unknown>): Promise<boolean> {
@@ -232,7 +246,7 @@ export function updateSupabaseClientAndReturn(env: SupabaseApiEnv, uuid: string,
   return callSupabaseRpc<Client | null>(env, 'cfm_update_client_returning', {
     input_uuid: uuid,
     input_patch: data,
-  });
+  }).then(normalizeClientBooleans);
 }
 
 export function deleteSupabaseClients(env: SupabaseApiEnv, uuids: string[]): Promise<DeleteClientsResult> {

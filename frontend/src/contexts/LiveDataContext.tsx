@@ -18,6 +18,7 @@ import { clearCachedPublicBootstrap, fetchPublicBootstrap, getCachedPublicBootst
 import { normalizeLiveDataResponse, normalizeViewerTokenResponse } from '../utils/liveDataResponse';
 import { notifyPublicDataUpdated, subscribePublicDataUpdated } from '../utils/publicDataEvents';
 import { notifyWebsiteMonitorsUpdated, type WebsiteMonitorsUpdateDetail } from '../utils/websiteMonitorEvents';
+import { useAuth } from './AuthContext';
 
 export interface LiveRecord {
   cpu: number;
@@ -214,6 +215,8 @@ interface LiveDataProviderProps {
 }
 
 export function LiveDataProvider({ children, enabled = true, viewer = true }: LiveDataProviderProps) {
+  const { isAuthenticated } = useAuth();
+  const includeHidden = isAuthenticated;
   const [liveData, setLiveData] = useState<LiveDataResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -279,7 +282,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
       return;
     }
     try {
-      const res = await fetch('/api/live/clients', { cache: 'no-store' });
+      const res = await fetch(`/api/live/clients${includeHidden ? '?include_hidden=1' : ''}`, { cache: 'no-store' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = normalizeLiveDataResponse(await res.json());
       if (!data) throw new Error('Invalid live data response');
@@ -291,7 +294,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [includeHidden]);
 
   const refresh = useCallback(() => {
     fetchLiveData();
@@ -327,7 +330,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
     };
 
     const loadSettings = (fresh = false) => {
-      fetchPublicBootstrap(fresh ? { cache: 'reload', cacheBust: true } : undefined)
+      fetchPublicBootstrap({ ...(fresh ? { cache: 'reload' as const, cacheBust: true } : {}), includeHidden })
         .then((payload) => {
           if (!cancelled) {
             applyBootstrap(payload);
@@ -371,7 +374,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
       window.removeEventListener(LIVE_POLL_SETTINGS_UPDATED_EVENT, handleSettingsUpdated);
       unsubscribePublicData();
     };
-  }, [enabled, viewer]);
+  }, [enabled, includeHidden, viewer]);
 
   useEffect(() => {
     if (!enabled || !viewer) {
@@ -400,7 +403,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
 
       let viewerToken = '';
       try {
-        const bootstrap = getCachedPublicBootstrap();
+        const bootstrap = includeHidden ? null : getCachedPublicBootstrap();
         const live = normalizeLiveDataResponse(bootstrap?.live);
         rememberInitialLiveMetadataVersion(bootstrap?.metadata_version || live?.metadata_version);
         if (live) {
@@ -422,7 +425,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
       if (cancelled || !viewerToken) return;
 
       const ws = new WebSocket(
-        buildLiveWebSocketUrl(window.location.origin, '/api/ws/live'),
+        buildLiveWebSocketUrl(window.location.origin, `/api/ws/live${includeHidden ? '?include_hidden=1' : ''}`),
         buildLiveWebSocketProtocols(viewerToken),
       );
       wsRef.current = ws;
@@ -548,7 +551,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
         ws.close();
       }
     };
-  }, [enabled, ensureFallbackViewerWindow, expireViewerSession, fetchLiveData, viewer]);
+  }, [enabled, ensureFallbackViewerWindow, expireViewerSession, fetchLiveData, includeHidden, viewer]);
 
   // 轮询
   useEffect(() => {

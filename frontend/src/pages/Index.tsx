@@ -87,8 +87,8 @@ function mergeLiveClientMetadata(clients: ClientInfo[], liveClients: LiveDataMap
   });
 }
 
-function applyPublicClientUpdate(current: ClientInfo[], detail?: PublicDataUpdateDetail): ClientInfo[] {
-  return mergePublicClientPatch(current, detail);
+function applyPublicClientUpdate(current: ClientInfo[], detail: PublicDataUpdateDetail | undefined, includeHidden: boolean): ClientInfo[] {
+  return mergePublicClientPatch(current, detail, { includeHidden });
 }
 
 function normalizeWebsiteSummary(input: unknown): WebsiteMonitorSummary | null {
@@ -290,7 +290,7 @@ export default function Index() {
     };
     const refreshPublicClients = (detail?: PublicDataUpdateDetail) => {
       clearCachedPublicBootstrap();
-      setClients((current) => applyPublicClientUpdate(current, detail));
+      setClients((current) => applyPublicClientUpdate(current, detail, isAuthenticated));
       if (detail?.clients) {
         setClientsLoading(false);
         setClientsError(null);

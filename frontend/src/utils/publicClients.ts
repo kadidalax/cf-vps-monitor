@@ -25,7 +25,14 @@ function numberField(record: Record<string, unknown>, key: string, fallback = 0)
 
 function booleanField(record: Record<string, unknown>, key: string, fallback = false): boolean {
   const value = record[key];
-  return typeof value === 'boolean' ? value : fallback;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1') return true;
+    if (normalized === 'false' || normalized === '0') return false;
+  }
+  return fallback;
 }
 
 function listItems(payload: unknown): unknown[] {
@@ -86,7 +93,11 @@ export function sortPublicClients(clients: ClientInfo[]): ClientInfo[] {
   });
 }
 
-export function mergePublicClientPatch(current: ClientInfo[], detail?: PublicClientPatchDetail): ClientInfo[] {
+export function mergePublicClientPatch(
+  current: ClientInfo[],
+  detail?: PublicClientPatchDetail,
+  options: { includeHidden?: boolean } = {},
+): ClientInfo[] {
   const clientDelta = detail?.clients;
   if (!clientDelta) return current;
 
@@ -101,14 +112,14 @@ export function mergePublicClientPatch(current: ClientInfo[], detail?: PublicCli
     const record = asRecord(raw);
     const uuid = typeof record?.uuid === 'string' ? record.uuid.trim() : '';
     if (!record || !uuid) continue;
-    if (record.hidden === true) {
+    if (!options.includeHidden && booleanField(record, 'hidden')) {
       byUuid.delete(uuid);
       remove.add(uuid);
       continue;
     }
 
     const normalized = normalizePublicClient(record);
-    if (!normalized || normalized.hidden) continue;
+    if (!normalized || (!options.includeHidden && normalized.hidden)) continue;
 
     const existing = byUuid.get(uuid);
     if (!existing) {

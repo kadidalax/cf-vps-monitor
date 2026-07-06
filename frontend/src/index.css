@@ -1733,7 +1733,99 @@ html[data-monitor-theme='next'] .node-network-value strong {
 }
 
 .admin-about-card {
-  max-width: 700px;
+  max-width: 100%;
+}
+
+.admin-about-tabs {
+  width: 100%;
+}
+
+.admin-about-card-full {
+  width: 100%;
+}
+
+.admin-about-hero {
+  min-width: 0;
+}
+
+.admin-about-logo {
+  width: 76px;
+  height: 76px;
+  border-radius: 20px;
+  background: linear-gradient(135deg, var(--accent-9), var(--accent-10));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.admin-about-stack-item,
+.admin-about-update-metric {
+  min-width: 0;
+  border: 1px solid var(--gray-a5);
+  border-radius: 8px;
+  background: var(--gray-a2);
+  padding: 10px;
+}
+
+.admin-about-stack-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  background: var(--accent-a3);
+  color: var(--accent-11);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.admin-about-feature-item {
+  min-width: 0;
+}
+
+.admin-about-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-9);
+  flex: 0 0 auto;
+  margin-top: 6px;
+}
+
+.admin-about-position {
+  display: block;
+  line-height: 1.7;
+}
+
+.admin-about-update-grid {
+  align-items: stretch;
+}
+
+.admin-about-update-grid > .rt-Card,
+.admin-about-update-grid > .rt-Card > .rt-CardInner,
+.admin-about-update-card {
+  height: 100%;
+}
+
+.admin-about-warning {
+  border: 1px solid color-mix(in srgb, var(--orange-9) 38%, transparent);
+  border-radius: 7px;
+  padding: 9px 10px;
+  background: color-mix(in srgb, var(--orange-9) 12%, transparent);
+  color: var(--orange-11);
+  line-height: 1.55;
+}
+
+.admin-about-commit-message {
+  border-left: 3px solid var(--accent-9);
+  border-radius: 0 6px 6px 0;
+  background: var(--accent-a2);
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  max-height: 220px;
+  overflow: auto;
+  line-height: 1.55;
 }
 
 .admin-server-header {

@@ -11,7 +11,7 @@ import { createViewerToken, verifyViewerToken } from '../auth/viewer-token';
 import { getAgentClientIdentityByToken } from './client';
 import { getCloudflareClientIp, isPublicIpAddress } from '../utils/request-ip';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
-import { invalidatePublicMetadataCache } from './public';
+import { hasAdminSession, invalidatePublicMetadataCache } from './public';
 
 const wsRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 type WsContext = Context<{ Bindings: Bindings; Variables: Variables }>;
@@ -318,7 +318,11 @@ wsRoutes.get('/ws/live', async (c) => {
   if (!isWebSocketUpgrade(c)) {
     const doId = c.env.LIVE_DATA.idFromName('global');
     const stub = c.env.LIVE_DATA.get(doId);
-    return stub.fetch(new Request(c.req.url, { method: 'GET' }));
+    const url = new URL(c.req.url);
+    const includeHidden = url.searchParams.get('include_hidden') === '1' && await hasAdminSession(c);
+    if (includeHidden) url.searchParams.set('include_hidden', '1');
+    else url.searchParams.delete('include_hidden');
+    return stub.fetch(new Request(url.toString(), { method: 'GET' }));
   }
   if (!requestHasValidOrigin(c)) {
     return c.json({ error: 'Invalid WebSocket Origin' }, 403);
@@ -339,6 +343,7 @@ wsRoutes.get('/ws/live', async (c) => {
 
   const doId = c.env.LIVE_DATA.idFromName('global');
   const stub = c.env.LIVE_DATA.get(doId);
+  const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
 
   const url = new URL(c.req.url);
   url.pathname = '/';
@@ -347,6 +352,7 @@ wsRoutes.get('/ws/live', async (c) => {
   url.searchParams.set('role', 'viewer');
   url.searchParams.set('viewer_ttl_ms', String(await viewerTtlMs(c)));
   url.searchParams.set('viewer_ip', viewerIp);
+  if (includeHidden) url.searchParams.set('include_hidden', '1');
 
   return stub.fetch(new Request(url.toString(), c.req.raw));
 });
@@ -354,13 +360,14 @@ wsRoutes.get('/ws/live', async (c) => {
 wsRoutes.get('/live/clients', async (c) => {
   const limited = await enforceLiveClientsRateLimit(c, requestIp(c));
   if (limited) return limited;
+  const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
 
   const doId = c.env.LIVE_DATA.idFromName('global');
   const stub = c.env.LIVE_DATA.get(doId);
 
-  const response = await stub.fetch(new Request('https://do/live', { method: 'GET' }));
+  const response = await stub.fetch(new Request(`https://do/live${includeHidden ? '?include_hidden=1' : ''}`, { method: 'GET' }));
   const snapshot = await readLiveSnapshot(response) ?? { online: [], count: 0 };
-  c.header('Cache-Control', `public, max-age=${LIVE_CLIENTS_CACHE_SECONDS}, s-maxage=${LIVE_CLIENTS_CACHE_SECONDS}, stale-while-revalidate=${LIVE_CLIENTS_CACHE_SECONDS * 2}`);
+  c.header('Cache-Control', includeHidden ? 'no-store' : `public, max-age=${LIVE_CLIENTS_CACHE_SECONDS}, s-maxage=${LIVE_CLIENTS_CACHE_SECONDS}, stale-while-revalidate=${LIVE_CLIENTS_CACHE_SECONDS * 2}`);
   return c.json(snapshot);
 });
 
