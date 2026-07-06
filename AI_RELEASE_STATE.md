@@ -21,6 +21,13 @@ main:
 - main has synced the production-ready dev feature set.
 - The expected branch-specific differences are repository URLs, install script sources, and one-click deploy links.
 
+## Latest Synced State
+
+- Updated: 2026-07-06
+- dev latest validated feature commit: `205e30ac` (`Fix hidden visibility for restored admin sessions`)
+- main latest released feature commit: `3020e240` (`Fix hidden visibility for restored admin sessions`)
+- These two commits contain the same released fix. Different hashes are expected because main preserves production-specific repository links.
+
 ## Before Releasing To main
 
 - Compare dev/main while ignoring line-ending-only differences.
