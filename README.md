@@ -86,8 +86,6 @@ npm run deploy
 
 1. 首次进入 GitHub Actions，如页面提示启用 workflow，点击启用。
 2. 打开仓库 `Settings -> Actions -> General -> Workflow permissions`，选择 `Read and write permissions`。
-3. 不需要勾选 `Allow GitHub Actions to create and approve pull requests`。
-4. 不需要创建或填写 GitHub Token。
 5. 在 Cloudflare Worker 变量中配置：
 
    ```text
