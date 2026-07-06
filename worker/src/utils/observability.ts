@@ -24,7 +24,6 @@ export const HEALTH_COMPONENTS = [
   'cron_offline',
   'cron_expiry',
   'cron_website',
-  'cron_demo_reset',
 ] as const;
 
 const HEALTH_KEY_PREFIX = 'health:';

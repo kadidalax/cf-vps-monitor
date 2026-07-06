@@ -32,9 +32,7 @@ export default function DbInit() {
   const [info, setInfo] = React.useState<InitInfo | null>(null);
   const [token, setToken] = React.useState('');
   const [loading, setLoading] = React.useState(false);
-  const [snapshotLoading, setSnapshotLoading] = React.useState(false);
   const [result, setResult] = React.useState<InitResult | null>(null);
-  const [snapshotResult, setSnapshotResult] = React.useState<InitResult | null>(null);
 
   React.useEffect(() => {
     fetch('/api/setup/database/init')
@@ -66,30 +64,6 @@ export default function DbInit() {
       toast.error(error instanceof Error ? error.message : '初始化失败');
     } finally {
       setLoading(false);
-    }
-  }
-
-  async function saveDemoSnapshot() {
-    if (!token.trim()) {
-      toast.error('请输入 Supabase Access Token');
-      return;
-    }
-    setSnapshotLoading(true);
-    setSnapshotResult(null);
-    try {
-      const response = await fetch('/api/setup/demo-reset/snapshot', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accessToken: token.trim() }),
-      });
-      const body = await readJson(response);
-      setSnapshotResult(body);
-      if (!response.ok || !body.success) throw new Error(body.error || `HTTP ${response.status}`);
-      toast.success('演示快照已保存');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : '保存演示快照失败');
-    } finally {
-      setSnapshotLoading(false);
     }
   }
 
@@ -145,17 +119,6 @@ export default function DbInit() {
               {loading ? <Loader2 className="db-init-spin" size={18} /> : <Database size={18} />}
               {loading ? '正在初始化...' : '一键初始化数据库'}
             </Button>
-            <Button
-              type="button"
-              size="3"
-              variant="soft"
-              disabled={snapshotLoading || !info?.ok}
-              onClick={saveDemoSnapshot}
-              style={{ height: 44, fontWeight: 700 }}
-            >
-              {snapshotLoading ? <Loader2 className="db-init-spin" size={18} /> : <Database size={18} />}
-              {snapshotLoading ? '正在保存...' : '保存当前演示快照'}
-            </Button>
           </Flex>
         </form>
 
@@ -177,18 +140,6 @@ export default function DbInit() {
                 ))}
               </Flex>
             )}
-          </Box>
-        )}
-
-        {snapshotResult && (
-          <Box className={`db-init-result ${snapshotResult.success ? 'is-success' : 'is-error'}`} mt="4">
-            <Flex align="center" gap="2">
-              {snapshotResult.success ? <CheckCircle2 size={18} /> : <XCircle size={18} />}
-              <Text size="2" weight="bold">
-                {snapshotResult.success ? '演示快照已保存' : '保存演示快照失败'}
-              </Text>
-            </Flex>
-            {snapshotResult.error && <Text size="2">{snapshotResult.error}</Text>}
           </Box>
         )}
 
