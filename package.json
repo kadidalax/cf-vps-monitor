@@ -8,6 +8,7 @@
     "worker"
   ],
   "scripts": {
+    "postinstall": "node scripts/install-wrangler-wrapper.mjs",
     "lint": "npm --prefix frontend run lint && npm --prefix worker run lint",
     "build:migrations": "node scripts/generate-migrations.mjs",
     "build": "npm --prefix frontend run build && npm --prefix worker run build",

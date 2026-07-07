@@ -2,6 +2,8 @@ name = "cf-vps-monitor"
 main = "worker/src/index.ts"
 compatibility_date = "2026-06-21"
 compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+preview_urls = true
 
 [observability]
 enabled = true

@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -7,11 +7,15 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const wrangler = join(root, 'node_modules', 'wrangler', 'bin', 'wrangler.js');
 const sourceConfig = join(root, 'wrangler.toml');
 const deployConfig = join(root, 'worker', '.tmp', 'wrangler-deploy.toml');
+const deploySecretsFile = join(root, 'worker', '.tmp', 'wrangler-secrets.json');
 const requiredSecrets = ['JWT_SECRET', 'SUPABASE_SERVICE_ROLE_KEY'];
 const deployArgs = process.argv.slice(2);
 const isDryRun = deployArgs.includes('--dry-run');
 const keepsExistingVars = deployArgs.includes('--keep-vars');
 const wranglerDeployArgs = deployArgs.filter(arg => arg !== '--skip-migrations');
+const deployCommand = process.env.CF_MONITOR_DEPLOY_COMMAND === 'versions-upload'
+  ? ['versions', 'upload']
+  : ['deploy'];
 
 function runWrangler(args, options = {}) {
   return spawnSync(process.execPath, [wrangler, ...args], {
@@ -61,6 +65,24 @@ function writeDeployConfig() {
   writeFileSync(deployConfig, generated);
 }
 
+function writeDeploySecretsFile() {
+  const secrets = Object.fromEntries(
+    requiredSecrets
+      .map(name => [name, process.env[name]?.trim() || ''])
+      .filter(([, value]) => value),
+  );
+  if (Object.keys(secrets).length === 0) return false;
+
+  const missing = requiredSecrets.filter(name => !secrets[name]);
+  if (missing.length) {
+    fail(`Missing required Worker secrets in build environment: ${missing.join(', ')}`);
+  }
+
+  mkdirSync(dirname(deploySecretsFile), { recursive: true });
+  writeFileSync(deploySecretsFile, JSON.stringify(secrets), { mode: 0o600 });
+  return true;
+}
+
 function checkSecrets() {
   const result = runWrangler(['secret', 'list', '--config', deployConfig]);
   if (result.status !== 0) {
@@ -81,18 +103,29 @@ function checkSecrets() {
   }
 }
 
+function buildWranglerDeployArgs() {
+  const args = [...deployCommand, '--config', deployConfig, ...wranglerDeployArgs];
+  if (hasDeploySecretsFile) args.push('--secrets-file', deploySecretsFile);
+  return args;
+}
+
 writeDeployConfig();
+const hasDeploySecretsFile = writeDeploySecretsFile();
 
 if (isDryRun) {
-  const deploy = runWrangler(['deploy', '--config', deployConfig, ...wranglerDeployArgs], { stdio: 'inherit' });
+  const args = buildWranglerDeployArgs();
+  const deploy = runWrangler(args, { stdio: 'inherit' });
+  if (hasDeploySecretsFile) rmSync(deploySecretsFile, { force: true });
   process.exit(deploy.status ?? 1);
 }
 
-if (!keepsExistingVars) {
+if (!keepsExistingVars && !hasDeploySecretsFile) {
   checkSecrets();
 }
 
 console.log('Deploying Worker. Initialize the database after deploy at /db-init.');
 
-const deploy = runWrangler(['deploy', '--config', deployConfig, ...wranglerDeployArgs], { stdio: 'inherit' });
+const args = buildWranglerDeployArgs();
+const deploy = runWrangler(args, { stdio: 'inherit' });
+if (hasDeploySecretsFile) rmSync(deploySecretsFile, { force: true });
 if (deploy.status !== 0) process.exit(deploy.status ?? 1);
