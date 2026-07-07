@@ -549,6 +549,16 @@ async function refreshLivePingTasks(c: AdminContext): Promise<void> {
   }
 }
 
+async function refreshLiveAgentPolicy(c: AdminContext): Promise<void> {
+  try {
+    const doId = c.env.LIVE_DATA.idFromName('global');
+    const stub = c.env.LIVE_DATA.get(doId);
+    await stub.fetch(new Request('https://do/policy-refresh', { method: 'POST' }));
+  } catch {
+    // Agent policy caches are short-lived; admin writes should not fail if refresh signalling is unavailable.
+  }
+}
+
 async function broadcastLiveMetadataChanged(c: AdminContext, detail: Record<string, unknown>): Promise<void> {
   try {
     const doId = c.env.LIVE_DATA.idFromName('global');
@@ -584,6 +594,7 @@ const WEBSITE_MONITOR_REQUIRED_EDIT_FIELDS = [
 function invalidateWebsiteMonitorPublicState(c: AdminContext, websites: WebsiteMonitorMetadataDetail = true): void {
   invalidateAdminPublicMetadata(c);
   runAdminBackground(c, broadcastLiveMetadataChanged(c, { websites }));
+  runAdminBackground(c, refreshLiveAgentPolicy(c));
 }
 
 type PingTaskAuditSource = Pick<db.PingTask, 'name' | 'type' | 'target' | 'all_clients' | 'clients' | 'interval_sec'>;

@@ -49,6 +49,7 @@ const RECORD_CAPACITY_AUDIT_THROTTLE_MS = 10 * 60 * 1000;
 const HOT_PATH_HEALTH_OK_THROTTLE_MS = 60 * 60 * 1000;
 const POLICY_SETTING_CACHE_MS = 30_000;
 const PING_TASK_CACHE_MS = 120_000;
+const WEBSITE_PROBE_TASK_CACHE_MS = 120_000;
 const AGENT_POLICY_OPTIONAL_ERROR_THROTTLE_MS = 5 * 60 * 1000;
 const RECORD_CAPACITY_SNAPSHOT_KEY = 'record:capacity:snapshot';
 const AGENT_POLICY_SETTING_KEYS = [
@@ -88,7 +89,6 @@ const GPU_MEMORY_BUCKET_RATIO = 0.01;
 const ADMIN_CLIENTS_SNAPSHOT_KEY = 'admin-clients:snapshot';
 const AGENT_AUTH_SNAPSHOT_PREFIX = 'agent-auth:';
 const AGENT_AUTH_UUID_PREFIX = 'agent-auth-uuid:';
-const LIVE_NETWORK_METADATA_SYNC_MS = 5 * 60 * 1000;
 const GEO_REGION_CACHE_MS = 48 * 60 * 60 * 1000;
 type SessionRole = 'agent' | 'viewer';
 type AgentPolicyMode = 'active' | 'idle';
@@ -395,10 +395,15 @@ export class LiveDataDO {
     pingIntervalSec: 120,
   };
   private policySettingsCheckedAt: number = 0;
+  private policySettingsPending: Promise<AgentPolicySettings> | null = null;
   private pingTasksCache: { value: db.PingTask[]; expiresAt: number } | null = null;
+  private pingTasksPending: Promise<db.PingTask[]> | null = null;
+  private websiteProbeTasksCache: Map<string, { value: db.WebsiteMonitor[]; expiresAt: number }> = new Map();
+  private websiteProbeTasksPending: Map<string, Promise<db.WebsiteMonitor[]>> = new Map();
   private policyOptionalErrorLastWriteAt: Map<string, number> = new Map();
   private adminClientsUpdatedAt: number | null = null;
   private networkMetadataSignatures = new Map<string, { signature: string; syncedAt: number }>();
+  private basicInfoSignatures = new Map<string, string>();
   private geoRegionCache = new Map<string, { region: string; expiresAt: number }>();
 
   constructor(state: DurableObjectState, env: LiveDataEnv) {
@@ -677,7 +682,7 @@ export class LiveDataDO {
 
     const signature = JSON.stringify(patch);
     const previous = this.networkMetadataSignatures.get(clientId);
-    if (previous?.signature === signature && now - previous.syncedAt < LIVE_NETWORK_METADATA_SYNC_MS) return;
+    if (previous?.signature === signature) return;
     this.networkMetadataSignatures.set(clientId, { signature, syncedAt: now });
 
     const client = { uuid: clientId, name: clientName || clientId, hidden, ...patch };
@@ -788,8 +793,9 @@ export class LiveDataDO {
     if (!forceRefresh && now - this.policySettingsCheckedAt < POLICY_SETTING_CACHE_MS) {
       return this.policySettings;
     }
+    if (!forceRefresh && this.policySettingsPending) return this.policySettingsPending;
 
-    try {
+    const pending = (async () => {
       const settings = buildAdminSettings(await db.getSettingsByKeys(database, AGENT_POLICY_SETTING_KEYS));
       this.policySettings = {
         activeIntervalSec: this.boundIntegerSetting(settings.live_poll_active_interval_sec, 3, 3, 300),
@@ -797,6 +803,12 @@ export class LiveDataDO {
         viewerTtlSec: this.boundIntegerSetting(settings.live_poll_active_max_duration_sec, 120, 60, 3600),
         pingIntervalSec: this.boundIntegerSetting(settings.ping_record_persist_interval_sec, 120, 60, 3600),
       };
+      this.policySettingsCheckedAt = now;
+      return this.policySettings;
+    })();
+    this.policySettingsPending = pending;
+    try {
+      return await pending;
     } catch (error) {
       await bestEffortRecordHealthEvent(
         database,
@@ -805,9 +817,11 @@ export class LiveDataDO {
         `policy settings lookup failed: ${errorDetail(error)}`,
         { auditAction: 'agent_policy_error' },
       );
+      this.policySettingsCheckedAt = now;
+      return this.policySettings;
+    } finally {
+      if (this.policySettingsPending === pending) this.policySettingsPending = null;
     }
-    this.policySettingsCheckedAt = now;
-    return this.policySettings;
   }
 
   private async getPingTasks(now: number, forceRefresh = false): Promise<db.PingTask[]> {
@@ -816,13 +830,21 @@ export class LiveDataDO {
     if (!forceRefresh && this.pingTasksCache && this.pingTasksCache.expiresAt > now) {
       return this.pingTasksCache.value;
     }
+    if (!forceRefresh && this.pingTasksPending) return this.pingTasksPending;
 
-    const tasks = await db.listPingTasks(database);
-    this.pingTasksCache = {
-      value: tasks,
-      expiresAt: now + PING_TASK_CACHE_MS,
-    };
-    return tasks;
+    const pending = db.listPingTasks(database).then((tasks) => {
+      this.pingTasksCache = {
+        value: tasks,
+        expiresAt: now + PING_TASK_CACHE_MS,
+      };
+      return tasks;
+    });
+    this.pingTasksPending = pending;
+    try {
+      return await pending;
+    } finally {
+      if (this.pingTasksPending === pending) this.pingTasksPending = null;
+    }
   }
 
   private pingTasksForClient(tasks: db.PingTask[], clientId?: string): db.PingTask[] {
@@ -855,13 +877,33 @@ export class LiveDataDO {
 
   private invalidatePingTasksCache(): void {
     this.pingTasksCache = null;
+    this.pingTasksPending = null;
+  }
+
+  private invalidateWebsiteProbeTasksCache(): void {
+    this.websiteProbeTasksCache.clear();
+    this.websiteProbeTasksPending.clear();
   }
 
   private async getWebsiteProbeTasks(now: number, clientId?: string): Promise<db.WebsiteMonitor[]> {
     const database = this.getQueryDatabase();
     if (!database || !clientId) return [];
+    const cached = this.websiteProbeTasksCache.get(clientId);
+    if (cached && cached.expiresAt > now) return cached.value;
+    const existing = this.websiteProbeTasksPending.get(clientId);
+    if (existing) return existing;
+
+    const pending = db.listAgentWebsiteProbeTasks(database, clientId, new Date(now).toISOString(), 20)
+      .then((tasks) => {
+        this.websiteProbeTasksCache.set(clientId, {
+          value: tasks,
+          expiresAt: now + WEBSITE_PROBE_TASK_CACHE_MS,
+        });
+        return tasks;
+      });
+    this.websiteProbeTasksPending.set(clientId, pending);
     try {
-      return await db.listAgentWebsiteProbeTasks(database, clientId, new Date(now).toISOString(), 20);
+      return await pending;
     } catch (error) {
       const component = 'agent_policy_website_probe_tasks';
       const previous = this.policyOptionalErrorLastWriteAt.get(component) || 0;
@@ -876,6 +918,10 @@ export class LiveDataDO {
         );
       }
       return [];
+    } finally {
+      if (this.websiteProbeTasksPending.get(clientId) === pending) {
+        this.websiteProbeTasksPending.delete(clientId);
+      }
     }
   }
 
@@ -1476,6 +1522,9 @@ export class LiveDataDO {
       }
     }
     if (Object.keys(patch).length === 0) return;
+    const signature = JSON.stringify(patch);
+    if (this.basicInfoSignatures.get(clientId) === signature) return;
+    this.basicInfoSignatures.set(clientId, signature);
     const database = this.getQueryDatabase();
     if (!database) return;
     try {
@@ -1614,6 +1663,7 @@ export class LiveDataDO {
     }
 
     if (request.method === 'POST' && url.pathname === '/policy-refresh') {
+      this.invalidateWebsiteProbeTasksCache();
       await this.broadcastAgentPolicy(Date.now(), false, true);
       return Response.json({ success: true });
     }
@@ -1626,6 +1676,7 @@ export class LiveDataDO {
 
     if (request.method === 'POST' && url.pathname === '/ping-tasks-refresh') {
       this.invalidatePingTasksCache();
+      this.invalidateWebsiteProbeTasksCache();
       await this.broadcastAgentPolicy(Date.now(), false, true);
       return Response.json({ success: true });
     }

@@ -29,9 +29,10 @@ type CloudflareRequestMetadata = {
 };
 const HTTP_LIVE_TTL_FALLBACK_MS = 180_000;
 const HTTP_LIVE_TTL_MAX_MS = 24 * 60 * 60 * 1000;
-export const AGENT_AUTH_CACHE_MS = 0;
+export const AGENT_AUTH_CACHE_MS = 120_000;
 const AGENT_AUTH_NEGATIVE_CACHE_MS = 10_000;
 const AGENT_AUTH_CACHE_MAX_ENTRIES = 512;
+const AGENT_TOKEN_USAGE_CACHE_MS = 15 * 60_000;
 const AGENT_PING_TASK_CACHE_MS = 120_000;
 const AGENT_PING_TASK_EMPTY_POLL_SEC = 3600;
 const AGENT_PING_TASK_MAX_POLL_SEC = 3600;
@@ -77,6 +78,7 @@ type AgentAuthLookupSource = 'memory' | 'do' | 'db' | 'miss';
 
 let agentAuthCache = new Map<string, AgentAuthCacheEntry<db.Client>>();
 let agentIdentityAuthCache = new Map<string, AgentAuthCacheEntry<db.ClientIdentity>>();
+let agentTokenUsageCache = new Map<string, { ip: string; expiresAt: number }>();
 let agentPingTasksCache: { value: db.PingTask[]; expiresAt: number } | null = null;
 let agentPingIntervalCache: { value: number; expiresAt: number } | null = null;
 const localAgentRateLimitBuckets = new Map<string, { count: number; resetAt: number }>();
@@ -93,6 +95,7 @@ export function invalidateAgentClientAuthCache(client?: { uuid?: string; token?:
   if (!client) {
     agentAuthCache.clear();
     agentIdentityAuthCache.clear();
+    agentTokenUsageCache.clear();
     return;
   }
   for (const [cacheKey, entry] of agentAuthCache) {
@@ -109,6 +112,30 @@ export function invalidateAgentClientAuthCache(client?: { uuid?: string; token?:
 
 async function agentTokenLookupHash(token: string): Promise<string> {
   return hashAgentToken(token);
+}
+
+async function markAgentTokenUsedIfDue(
+  database: db.QueryDatabase,
+  client: Pick<db.Client, 'uuid' | 'name' | 'token_last_used_ip'>,
+  cacheKey: string,
+  ip: string,
+  now = Date.now(),
+): Promise<void> {
+  const normalizedIp = ip.trim();
+  const cached = agentTokenUsageCache.get(cacheKey);
+  if (cached && cached.expiresAt > now && cached.ip === normalizedIp) return;
+  if (agentTokenUsageCache.size >= AGENT_AUTH_CACHE_MAX_ENTRIES) {
+    const firstKey = agentTokenUsageCache.keys().next().value;
+    if (typeof firstKey === 'string') agentTokenUsageCache.delete(firstKey);
+  }
+  agentTokenUsageCache.set(cacheKey, {
+    ip: normalizedIp,
+    expiresAt: now + AGENT_TOKEN_USAGE_CACHE_MS,
+  });
+  const tokenUsageUpdated = await db.markClientTokenUsed(database, client.uuid, normalizedIp).catch(() => false);
+  if (tokenUsageUpdated) {
+    await recordAgentTokenSourceIpChange(database, client, normalizedIp).catch(() => undefined);
+  }
 }
 
 export function invalidateAgentPingTaskCache(): void {
@@ -314,12 +341,7 @@ export async function getAgentClientByToken(
     const cachedClient = stripCachedAgentToken(liveAuthClient);
     setAgentAuthCache(agentAuthCache, cacheKey, cachedClient, AGENT_AUTH_CACHE_MS, now);
     onAuthSource?.('do');
-    const tokenUsageTask = (async () => {
-      const tokenUsageUpdated = await db.markClientTokenUsed(database, liveAuthClient.uuid, ip).catch(() => false);
-      if (tokenUsageUpdated) {
-        await recordAgentTokenSourceIpChange(database, liveAuthClient, ip).catch(() => undefined);
-      }
-    })();
+    const tokenUsageTask = markAgentTokenUsedIfDue(database, liveAuthClient, cacheKey, ip, now);
     if (deferBackground) deferBackground(tokenUsageTask);
     else await tokenUsageTask;
     return cachedClient;
@@ -332,12 +354,9 @@ export async function getAgentClientByToken(
     setAgentAuthCache(agentAuthCache, cacheKey, cachedClient, AGENT_AUTH_CACHE_MS, now);
     if (!pendingInstallToken && deferBackground) deferBackground(upsertLiveAgentAuthClient(env, client));
     onAuthSource?.('db');
-    const tokenUsageTask = pendingInstallToken ? promotePendingInstallToken(database, env, client, token, ip) : (async () => {
-      const tokenUsageUpdated = await db.markClientTokenUsed(database, client.uuid, ip).catch(() => false);
-      if (tokenUsageUpdated) {
-        await recordAgentTokenSourceIpChange(database, client, ip).catch(() => undefined);
-      }
-    })();
+    const tokenUsageTask = pendingInstallToken
+      ? promotePendingInstallToken(database, env, client, token, ip)
+      : markAgentTokenUsedIfDue(database, client, cacheKey, ip, now);
     if (deferBackground) deferBackground(tokenUsageTask);
     else await tokenUsageTask;
     return cachedClient;
@@ -369,12 +388,7 @@ export async function getAgentClientIdentityByToken(
     const cachedClient = stripCachedAgentToken(liveAuthClient);
     setAgentAuthCache(agentIdentityAuthCache, cacheKey, cachedClient, AGENT_AUTH_CACHE_MS, now);
     onAuthSource?.('do');
-    const tokenUsageTask = (async () => {
-      const tokenUsageUpdated = await db.markClientTokenUsed(database, liveAuthClient.uuid, ip).catch(() => false);
-      if (tokenUsageUpdated) {
-        await recordAgentTokenSourceIpChange(database, liveAuthClient, ip).catch(() => undefined);
-      }
-    })();
+    const tokenUsageTask = markAgentTokenUsedIfDue(database, liveAuthClient, cacheKey, ip, now);
     if (deferBackground) deferBackground(tokenUsageTask);
     else await tokenUsageTask;
     return cachedClient;
@@ -386,12 +400,9 @@ export async function getAgentClientIdentityByToken(
     const cachedClient = stripCachedAgentToken(client);
     setAgentAuthCache(agentIdentityAuthCache, cacheKey, cachedClient, AGENT_AUTH_CACHE_MS, now);
     onAuthSource?.('db');
-    const tokenUsageTask = pendingInstallToken ? promotePendingInstallToken(database, env, client, token, ip) : (async () => {
-      const tokenUsageUpdated = await db.markClientTokenUsed(database, client.uuid, ip).catch(() => false);
-      if (tokenUsageUpdated) {
-        await recordAgentTokenSourceIpChange(database, client, ip).catch(() => undefined);
-      }
-    })();
+    const tokenUsageTask = pendingInstallToken
+      ? promotePendingInstallToken(database, env, client, token, ip)
+      : markAgentTokenUsedIfDue(database, client, cacheKey, ip, now);
     if (deferBackground) deferBackground(tokenUsageTask);
     else await tokenUsageTask;
     return cachedClient;

@@ -73,6 +73,8 @@ const BUNDLED_VERSION = APP_VERSION;
 const CSRF_REJECTION_AUDIT_THROTTLE_MS = 60_000;
 const CSRF_REJECTION_AUDIT_THROTTLE_MAX_ENTRIES = 512;
 const ADMIN_SESSION_EDGE_CACHE_SECONDS = 30;
+const RECORD_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const RECORD_CLEANUP_LAST_RUN_KEY = 'maintenance_last_cleanup_at';
 const csrfRejectionAuditThrottle = new Map<string, { expiresAt: number }>();
 
 const SECURITY_HEADERS: Record<string, string> = {
@@ -393,6 +395,7 @@ const SCHEDULED_SETTING_KEYS = [
   'ping_record_preserve_time',
   'audit_log_preserve_time',
   'offline_notify_never_reported',
+  RECORD_CLEANUP_LAST_RUN_KEY,
 ];
 
 interface ScheduledRunContext {
@@ -539,6 +542,10 @@ async function sendNotification(context: ScheduledRunContext, notification: Noti
 
 async function runRecordCleanup(context: ScheduledRunContext, now: Date): Promise<void> {
   const settings = await context.getSettings();
+  const lastCleanupAt = Date.parse(settings[RECORD_CLEANUP_LAST_RUN_KEY] || '');
+  if (Number.isFinite(lastCleanupAt) && now.getTime() - lastCleanupAt < RECORD_CLEANUP_INTERVAL_MS) {
+    return;
+  }
   const recordHours = Math.min(72, Math.max(1, Number(settings['record_preserve_time'] || 72)));
   const pingHours = Math.min(72, Math.max(1, Number(settings['ping_record_preserve_time'] || recordHours)));
   const auditHours = Math.max(24, Number(settings['audit_log_preserve_time'] || 2160));
@@ -557,6 +564,7 @@ async function runRecordCleanup(context: ScheduledRunContext, now: Date): Promis
     ...pingDeleted,
     ...auditDeleted,
   };
+  await db.setSetting(context.database, RECORD_CLEANUP_LAST_RUN_KEY, now.toISOString());
   const deletedRows = Object.values(deleted).reduce((sum, value) => sum + Number(value || 0), 0);
   if (deletedRows === 0) {
     return;
@@ -568,7 +576,6 @@ async function runRecordCleanup(context: ScheduledRunContext, now: Date): Promis
       audit_logs: auditBefore,
     },
     deleted,
-    expired_backlog_after: 'skipped_for_quota',
   })}`);
 }
 

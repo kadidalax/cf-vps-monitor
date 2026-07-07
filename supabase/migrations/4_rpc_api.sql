@@ -3246,10 +3246,7 @@ revoke all on function public.cfm_public_websites(integer, integer) from anon;
 revoke all on function public.cfm_public_websites(integer, integer) from authenticated;
 grant execute on function public.cfm_public_websites(integer, integer) to service_role;
 
-revoke all on function public.cfm_public_website_monitor(integer, integer) from public;
-revoke all on function public.cfm_public_website_monitor(integer, integer) from anon;
-revoke all on function public.cfm_public_website_monitor(integer, integer) from authenticated;
-grant execute on function public.cfm_public_website_monitor(integer, integer) to service_role;
+drop function if exists public.cfm_public_website_monitor(integer, integer);
 
 revoke all on function public.cfm_public_website_monitor(integer, integer, boolean) from public;
 revoke all on function public.cfm_public_website_monitor(integer, integer, boolean) from anon;
@@ -4375,20 +4372,14 @@ as $$
   returning to_jsonb(website_monitors.*);
 $$;
 
-revoke all on function public.cfm_public_websites(integer, integer) from public;
-revoke all on function public.cfm_public_websites(integer, integer) from anon;
-revoke all on function public.cfm_public_websites(integer, integer) from authenticated;
-grant execute on function public.cfm_public_websites(integer, integer) to service_role;
+drop function if exists public.cfm_public_websites(integer, integer);
 
 revoke all on function public.cfm_public_websites(integer, integer, boolean) from public;
 revoke all on function public.cfm_public_websites(integer, integer, boolean) from anon;
 revoke all on function public.cfm_public_websites(integer, integer, boolean) from authenticated;
 grant execute on function public.cfm_public_websites(integer, integer, boolean) to service_role;
 
-revoke all on function public.cfm_public_website_monitor(integer, integer) from public;
-revoke all on function public.cfm_public_website_monitor(integer, integer) from anon;
-revoke all on function public.cfm_public_website_monitor(integer, integer) from authenticated;
-grant execute on function public.cfm_public_website_monitor(integer, integer) to service_role;
+drop function if exists public.cfm_public_website_monitor(integer, integer);
 
 revoke all on function public.cfm_public_website_monitor(integer, integer, boolean) from public;
 revoke all on function public.cfm_public_website_monitor(integer, integer, boolean) from anon;
@@ -4552,10 +4543,7 @@ as $$
   from monitor_rows m;
 $$;
 
-revoke all on function public.cfm_public_websites(integer, integer) from public;
-revoke all on function public.cfm_public_websites(integer, integer) from anon;
-revoke all on function public.cfm_public_websites(integer, integer) from authenticated;
-grant execute on function public.cfm_public_websites(integer, integer) to service_role;
+drop function if exists public.cfm_public_websites(integer, integer);
 
 revoke all on function public.cfm_public_websites(integer, integer, boolean) from public;
 revoke all on function public.cfm_public_websites(integer, integer, boolean) from anon;
