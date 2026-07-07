@@ -441,6 +441,7 @@ export default function Index() {
           client={client}
           live={ld.data[client.uuid]}
           online={ld.online.includes(client.uuid)}
+          includeHidden={isAuthenticated}
         />
       ))}
     </Box>
@@ -476,6 +477,7 @@ export default function Index() {
             liveData={liveMap}
             gridRenderer={renderGrid}
             offlinePosition={offlinePosition}
+            includeHidden={isAuthenticated}
           />
         </React.Suspense>
       ) : (

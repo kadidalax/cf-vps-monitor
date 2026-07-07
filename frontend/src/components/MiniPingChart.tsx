@@ -28,6 +28,7 @@ interface MiniPingChartProps {
   limit?: number;
   rangeHours?: number;
   fillContainer?: boolean;
+  includeHidden?: boolean;
 }
 
 export default function MiniPingChart({
@@ -37,6 +38,7 @@ export default function MiniPingChart({
   limit = 360,
   rangeHours = 1,
   fillContainer = false,
+  includeHidden = false,
 }: MiniPingChartProps) {
   const [series, setSeries] = useState<PingTaskSeries[]>([]);
   const [loading, setLoading] = useState(true);
@@ -56,6 +58,7 @@ export default function MiniPingChart({
           limit,
           maxTasks: 8,
           rangeHours,
+          includeHidden,
           signal: controller.signal,
         });
         if (!controller.signal.aborted) setSeries(nextSeries);
@@ -71,7 +74,7 @@ export default function MiniPingChart({
 
     loadData();
     return () => controller.abort();
-  }, [limit, rangeHours, uuid]);
+  }, [includeHidden, limit, rangeHours, uuid]);
 
   const seriesWithRecords = useMemo(
     () => getPingSeriesWithRecords(series),

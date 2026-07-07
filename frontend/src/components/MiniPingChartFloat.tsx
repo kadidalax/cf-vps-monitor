@@ -10,6 +10,7 @@ interface MiniPingChartFloatProps {
   chartHeight?: number;
   limit?: number;
   rangeHours?: number;
+  includeHidden?: boolean;
 }
 
 export default function MiniPingChartFloat({
@@ -19,6 +20,7 @@ export default function MiniPingChartFloat({
   chartHeight = 260,
   limit = 360,
   rangeHours = 1,
+  includeHidden = false,
 }: MiniPingChartFloatProps) {
   const [open, setOpen] = useState(false);
 
@@ -55,7 +57,7 @@ export default function MiniPingChartFloat({
           maxWidth: 'calc(100vw - 24px)',
         }}
       >
-        <MiniPingChart uuid={uuid} width="100%" height={chartHeight} limit={limit} rangeHours={rangeHours} />
+        <MiniPingChart uuid={uuid} width="100%" height={chartHeight} limit={limit} rangeHours={rangeHours} includeHidden={includeHidden} />
       </Popover.Content>
     </Popover.Root>
   );

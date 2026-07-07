@@ -17,6 +17,7 @@ import { formatCpuSpec } from '../utils/cpuFormat';
 interface NodeTableProps {
   nodes: ClientInfo[];
   liveData: LiveDataMap;
+  includeHidden?: boolean;
 }
 
 type SortKey = 'manual' | 'name' | 'os' | 'status' | 'cpu' | 'ram' | 'disk' | 'network' | 'price' | 'traffic';
@@ -123,10 +124,12 @@ function ExpandedNodeDetails({
   node,
   live,
   lastReportTime,
+  includeHidden = false,
 }: {
   node: ClientInfo;
   live?: LiveRecord;
   lastReportTime?: number;
+  includeHidden?: boolean;
 }) {
   return (
     <Box className="node-table-expanded">
@@ -185,14 +188,14 @@ function ExpandedNodeDetails({
         </div>
 
         <div className="node-table-ping-section">
-          <MiniPingChart uuid={node.uuid} width="100%" height={210} limit={180} fillContainer />
+          <MiniPingChart uuid={node.uuid} width="100%" height={210} limit={180} fillContainer includeHidden={includeHidden} />
         </div>
       </div>
     </Box>
   );
 }
 
-export default function NodeTable({ nodes, liveData }: NodeTableProps) {
+export default function NodeTable({ nodes, liveData, includeHidden = false }: NodeTableProps) {
   const [sortKey, setSortKey] = useState<SortKey>('manual');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [expandedRows, setExpandedRows] = useState<string[]>([]);
@@ -427,6 +430,7 @@ export default function NodeTable({ nodes, liveData }: NodeTableProps) {
                         node={node}
                         live={live}
                         lastReportTime={lastReportMap.get(node.uuid)}
+                        includeHidden={includeHidden}
                       />
                     </Table.Cell>
                   </Table.Row>

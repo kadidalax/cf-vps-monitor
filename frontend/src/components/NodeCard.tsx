@@ -17,6 +17,7 @@ interface NodeCardProps {
   client: ClientInfo;
   live?: LiveRecord;
   online: boolean;
+  includeHidden?: boolean;
 }
 
 function NodeRegionTagsLine({ region, tags }: { region?: string; tags?: string }) {
@@ -206,7 +207,7 @@ function NodeIpBadges({ client, className }: { client: ClientInfo; className?: s
   );
 }
 
-export default function NodeCard({ client, live, online }: NodeCardProps) {
+export default function NodeCard({ client, live, online, includeHidden = false }: NodeCardProps) {
   const isMobile = useIsMobile();
   const defaultLive: LiveRecord = {
     cpu: 0,
@@ -313,6 +314,7 @@ export default function NodeCard({ client, live, online }: NodeCardProps) {
                 chartHeight={260}
                 limit={360}
                 rangeHours={1}
+                includeHidden={includeHidden}
                 trigger={
                   <IconButton className="node-card-action" data-node-card-action="true" variant="ghost" size="2" aria-label="查看 Ping 延迟" title="查看 Ping 延迟走势">
                     <TrendingUp size={16} />

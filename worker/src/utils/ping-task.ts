@@ -160,6 +160,9 @@ function validateHttpTarget(target: string): string | null {
 function validateIcmpTarget(target: string): string | null {
   if (/\s/.test(target)) return 'ICMP 目标不能包含空白字符';
   if (target.includes('://')) return 'ICMP 目标必须是主机名或 IP';
+  if (/^\[[^\]]+\]:.+$/.test(target) || (target.match(/:/g) || []).length === 1) {
+    return 'ICMP 目标不能包含端口，请仅填写域名或 IP';
+  }
   const boundaryError = validateNetworkBoundary(target);
   if (boundaryError) return boundaryError;
   return null;
