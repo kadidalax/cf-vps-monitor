@@ -8,7 +8,8 @@ const wrangler = join(root, 'node_modules', 'wrangler', 'bin', 'wrangler.js');
 const sourceConfig = join(root, 'wrangler.toml');
 const deployConfig = join(root, 'worker', '.tmp', 'wrangler-deploy.toml');
 const deploySecretsFile = join(root, 'worker', '.tmp', 'wrangler-secrets.json');
-const requiredSecrets = ['JWT_SECRET', 'SUPABASE_SERVICE_ROLE_KEY'];
+const requiredSecrets = ['JWT_SECRET'];
+const supabaseSecretNames = ['SUPABASE_SECRET_KEY', 'SUPABASE_SERVICE_ROLE_KEY'];
 const deployArgs = process.argv.slice(2);
 const isDryRun = deployArgs.includes('--dry-run');
 const keepsExistingVars = deployArgs.includes('--keep-vars');
@@ -67,7 +68,7 @@ function writeDeployConfig() {
 
 function writeDeploySecretsFile() {
   const secrets = Object.fromEntries(
-    requiredSecrets
+    [...requiredSecrets, ...supabaseSecretNames]
       .map(name => [name, process.env[name]?.trim() || ''])
       .filter(([, value]) => value),
   );
@@ -76,6 +77,9 @@ function writeDeploySecretsFile() {
   const missing = requiredSecrets.filter(name => !secrets[name]);
   if (missing.length) {
     fail(`Missing required Worker secrets in build environment: ${missing.join(', ')}`);
+  }
+  if (!supabaseSecretNames.some(name => secrets[name])) {
+    fail('Missing required Worker secret in build environment: SUPABASE_SECRET_KEY');
   }
 
   mkdirSync(dirname(deploySecretsFile), { recursive: true });
@@ -100,6 +104,9 @@ function checkSecrets() {
   const missing = requiredSecrets.filter(name => !names.has(name));
   if (missing.length) {
     fail(`Missing required Worker secrets: ${missing.join(', ')}\nSet them with: npx wrangler secret put <NAME>`);
+  }
+  if (!supabaseSecretNames.some(name => names.has(name))) {
+    fail('Missing required Worker secret: SUPABASE_SECRET_KEY\nSet it with: npx wrangler secret put SUPABASE_SECRET_KEY');
   }
 }
 

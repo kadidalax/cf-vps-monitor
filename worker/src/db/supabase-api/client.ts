@@ -5,6 +5,7 @@ import { generateAgentToken, hashAgentToken } from '../../utils/client.ts';
 
 export type SupabaseApiEnv = {
   SUPABASE_URL?: string;
+  SUPABASE_SECRET_KEY?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
 };
 
@@ -26,16 +27,29 @@ export class SupabaseApiError extends Error {
 }
 
 export function isSupabaseApiConfigured(env: SupabaseApiEnv): boolean {
-  return Boolean(env.SUPABASE_URL?.trim() && env.SUPABASE_SERVICE_ROLE_KEY?.trim());
+  return Boolean(env.SUPABASE_URL?.trim() && resolveSupabaseApiKey(env));
+}
+
+export function resolveSupabaseApiKey(env: SupabaseApiEnv): string {
+  return env.SUPABASE_SECRET_KEY?.trim() || env.SUPABASE_SERVICE_ROLE_KEY?.trim() || '';
 }
 
 function readSupabaseConfig(env: SupabaseApiEnv): { url: string; key: string } {
   const url = env.SUPABASE_URL?.trim().replace(/\/+$/, '');
-  const key = env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  const key = resolveSupabaseApiKey(env);
   if (!url || !key) {
-    throw new SupabaseApiConfigurationError('SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for Supabase Data API mode.');
+    throw new SupabaseApiConfigurationError('SUPABASE_URL and SUPABASE_SECRET_KEY are required for Supabase Data API mode.');
   }
   return { url, key };
+}
+
+function supabaseRpcHeaders(key: string): Record<string, string> {
+  return {
+    apikey: key,
+    ...(key.startsWith('sb_secret_') ? {} : { Authorization: `Bearer ${key}` }),
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+  };
 }
 
 function sanitizeSupabaseDetail(detail: string, key: string): string {
@@ -51,12 +65,7 @@ export async function callSupabaseRpc<T>(
   const { url, key } = readSupabaseConfig(env);
   const response = await fetcher(`${url}/rest/v1/rpc/${encodeURIComponent(functionName)}`, {
     method: 'POST',
-    headers: {
-      apikey: key,
-      Authorization: `Bearer ${key}`,
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
+    headers: supabaseRpcHeaders(key),
     body: JSON.stringify(body),
   });
   if (!response.ok) {

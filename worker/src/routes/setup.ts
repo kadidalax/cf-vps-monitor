@@ -157,6 +157,9 @@ function secretsCheck(env: Bindings): SetupCheck {
   if (new TextEncoder().encode(env.JWT_SECRET?.trim() || '').byteLength < 32) {
     missing.push('JWT_SECRET must be at least 32 bytes');
   }
+  if (!(env.SUPABASE_SECRET_KEY?.trim() || env.SUPABASE_SERVICE_ROLE_KEY?.trim())) {
+    missing.push('SUPABASE_SECRET_KEY is required');
+  }
   return missing.length > 0
     ? setupCheck('secrets', 'error', missing.join('; '))
     : setupCheck('secrets', 'ok', 'Required runtime secrets are configured');

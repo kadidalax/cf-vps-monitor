@@ -37,7 +37,7 @@ export function getDatabase(env: DatabaseProviderEnv): AppDatabase {
   if (!isSupabaseApiConfigured(env)) {
     throw new DatabaseConfigurationError(
       'missing_supabase_config',
-      'SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for Supabase HTTP API/RPC mode.',
+      'SUPABASE_URL and SUPABASE_SECRET_KEY are required for Supabase HTTP API/RPC mode.',
     );
   }
   return { provider: 'supabase-api', env };

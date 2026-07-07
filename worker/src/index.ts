@@ -50,7 +50,9 @@ import type {
 
 type RuntimeBindings = {
   SUPABASE_URL?: string;
+  SUPABASE_SECRET_KEY?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
+  JWT_SECRET?: string;
   SETUP_DIAGNOSTICS_ENABLED?: string;
   CURRENT_GIT_COMMIT?: string;
 };

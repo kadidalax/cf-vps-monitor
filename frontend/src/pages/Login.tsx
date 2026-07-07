@@ -109,9 +109,9 @@ export default function Login() {
 
   const handleRecoverySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const needsServiceRoleKey = recoveryStatus?.admin_present === true;
-    if ((needsServiceRoleKey && !recoveryKey) || !recoveryUsername || !recoveryPassword) {
-      toast.error(needsServiceRoleKey ? '请填写 service_role key、用户名和新密码' : '请填写用户名和密码');
+    const needsSecretKey = recoveryStatus?.admin_present === true;
+    if ((needsSecretKey && !recoveryKey) || !recoveryUsername || !recoveryPassword) {
+      toast.error(needsSecretKey ? '请填写 Supabase Secret key、用户名和新密码' : '请填写用户名和密码');
       return;
     }
 
@@ -121,7 +121,7 @@ export default function Login() {
         username: recoveryUsername,
         password: recoveryPassword,
       };
-      if (needsServiceRoleKey) payload.supabase_service_role_key = recoveryKey;
+      if (needsSecretKey) payload.supabase_secret_key = recoveryKey;
       const response = await fetch('/api/admin/recovery', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -147,7 +147,7 @@ export default function Login() {
   };
 
   const recoveryTitle = recoveryStatus?.admin_present ? '重置管理员' : '创建管理员';
-  const needsServiceRoleKey = recoveryStatus?.admin_present === true;
+  const needsSecretKey = recoveryStatus?.admin_present === true;
 
   return (
     <div className="login-page">
@@ -237,15 +237,15 @@ export default function Login() {
         {recoveryMode && (
           <form onSubmit={handleRecoverySubmit}>
             <Flex direction="column" gap="4">
-              {needsServiceRoleKey && <label htmlFor="recovery-service-role-key">
+              {needsSecretKey && <label htmlFor="recovery-secret-key">
                 <Text size="2" weight="bold" style={{ marginBottom: 6, display: 'inline-block' }}>
-                  Supabase service_role key
+                  Supabase Secret key
                 </Text>
                 <TextField.Root
-                  id="recovery-service-role-key"
+                  id="recovery-secret-key"
                   size="3"
                   type="password"
-                  placeholder="请输入 Supabase service_role key"
+                  placeholder="请输入 Supabase Secret key"
                   value={recoveryKey}
                   onChange={(e) => setRecoveryKey(e.target.value)}
                   autoComplete="off"
@@ -265,7 +265,7 @@ export default function Login() {
                   value={recoveryUsername}
                   onChange={(e) => setRecoveryUsername(e.target.value)}
                   autoComplete="username"
-                  autoFocus={!needsServiceRoleKey}
+                  autoFocus={!needsSecretKey}
                   style={{ width: '100%' }}
                 />
               </label>

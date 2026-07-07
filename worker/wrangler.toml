@@ -36,9 +36,6 @@ new_sqlite_classes = ["RateLimitDO"]
 [vars]
 SUPABASE_URL = "https://PROJECT_REF.supabase.co"
 
-[secrets]
-required = ["JWT_SECRET", "SUPABASE_SERVICE_ROLE_KEY"]
-
 [assets]
 directory = "../frontend/dist"
 not_found_handling = "single-page-application"
