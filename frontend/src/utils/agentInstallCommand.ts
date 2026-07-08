@@ -167,7 +167,7 @@ function normalizeInstanceId(value?: string) {
 
 function sudoBashPipe(downloadCommand: string, args: string[]) {
   const quotedArgs = args.map(shellQuote).join(' ');
-  return `${downloadCommand} | sudo bash -s -- ${quotedArgs}`;
+  return `${downloadCommand} | { SUDO=; [ "$(id -u)" -eq 0 ] || SUDO=sudo; $SUDO bash -s -- ${quotedArgs}; }`;
 }
 
 export function buildAgentInstallCommand({

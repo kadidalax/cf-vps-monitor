@@ -863,6 +863,23 @@ func TestExecuteICMPPingUsesResolvedPublicIP(t *testing.T) {
 	}
 }
 
+func TestLinuxServiceAllowsIcmpPingCapability(t *testing.T) {
+	raw, err := os.ReadFile("install-linux.sh")
+	if err != nil {
+		t.Fatalf("read install-linux.sh: %v", err)
+	}
+	unit := string(raw)
+	for _, want := range []string{
+		"AmbientCapabilities=CAP_NET_RAW",
+		"CapabilityBoundingSet=CAP_NET_RAW",
+		"NoNewPrivileges=true",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Fatalf("install-linux.sh missing %s", want)
+		}
+	}
+}
+
 func TestExecuteTCPPingExcludesDNSResolutionTime(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

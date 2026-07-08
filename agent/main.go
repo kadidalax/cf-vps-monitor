@@ -940,10 +940,16 @@ func executeICMPPing(target string) float64 {
 		cmd = exec.Command("ping", "-c", "1", "-W", "2", pingTarget)
 	}
 
-	err = cmd.Run()
+	output, err := cmd.CombinedOutput()
 	elapsed := time.Since(start).Milliseconds()
 
 	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail != "" {
+			log.Printf("ICMP ping failed for %q (%s): %v: %s", target, pingTarget, err, detail)
+		} else {
+			log.Printf("ICMP ping failed for %q (%s): %v", target, pingTarget, err)
+		}
 		return -1
 	}
 	return float64(elapsed)

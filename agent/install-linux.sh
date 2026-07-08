@@ -713,6 +713,9 @@ WorkingDirectory=${INSTALL_DIR}
 ExecStart=${INSTALL_DIR}/cf-vps-monitor-agent --interval ${INTERVAL} --ping-interval ${PING_INTERVAL} --traffic-reset-day ${TRAFFIC_RESET_DAY}
 Restart=always
 RestartSec=5
+# Allow ICMP ping for the unprivileged service user without granting broad root privileges.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
