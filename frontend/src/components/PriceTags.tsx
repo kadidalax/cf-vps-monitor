@@ -1,6 +1,6 @@
 import React from 'react';
 import { Badge, Flex } from '@radix-ui/themes';
-import { formatBillingCycle } from '../utils/billing';
+import { formatBillingCycle, getExpiryInfo } from '../utils/billing';
 import { getVisibleMonitorTags, TAG_COLORS, type TagColor } from '../utils/tags';
 
 interface PriceTagsProps {
@@ -13,20 +13,6 @@ interface PriceTagsProps {
   hidden?: boolean;
   showTags?: boolean;
   showExpiry?: boolean;
-}
-
-function getExpiryInfo(expired_at?: string | number): { label: string; color: string } {
-  if (!expired_at) return { label: '', color: 'gray' };
-  const expiredDate = new Date(expired_at);
-  const now = new Date();
-  const diffTime = expiredDate.getTime() - now.getTime();
-  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-  if (diffDays <= 0) return { label: '已过期', color: 'red' };
-  if (diffDays > 36500) return { label: '长期', color: 'green' };
-  if (diffDays <= 7) return { label: `${diffDays}天后到期`, color: 'red' };
-  if (diffDays <= 15) return { label: `${diffDays}天后到期`, color: 'orange' };
-  return { label: `${diffDays}天后到期`, color: 'green' };
 }
 
 export default function PriceTags({

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Flex, Text, Button, TextField,
   Dialog, Badge, Switch, Table, Tabs, Select,
-  Box, Checkbox,
+  Box, Checkbox, TextArea,
 } from '@radix-ui/themes';
 import { Plus, Pencil, Trash2, Search, Send, Save, Unplug, TrendingUp, Bell, CalendarClock } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
@@ -92,15 +92,18 @@ export default function AdminNotifications() {
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [testRecipient, setTestRecipient] = useState('');
   const [testEmailSending, setTestEmailSending] = useState(false);
+  const [testWebhookSending, setTestWebhookSending] = useState(false);
   const [smtpOpen, setSmtpOpen] = useState(false);
   const [telegramOpen, setTelegramOpen] = useState(false);
+  const [webhookOpen, setWebhookOpen] = useState(false);
   const clientsRef = useRef<NotificationClient[]>([]);
   const clientsLoadedRef = useRef(false);
   const clientsLoadPromiseRef = useRef<Promise<NotificationClient[]> | null>(null);
 
   const syncChannelCards = useCallback((method: string) => {
     setSmtpOpen(method === 'email');
-    setTelegramOpen(method !== 'email' && method !== 'none');
+    setTelegramOpen(method === 'telegram');
+    setWebhookOpen(method === 'webhook');
   }, []);
 
   // Offline tab state
@@ -428,6 +431,22 @@ export default function AdminNotifications() {
     setSettings((prev) => ({ ...prev, [key]: value }));
   };
 
+  const updateSensitiveWebhookSetting = (
+    key: 'webhook_url' | 'webhook_secret' | 'webhook_headers_json' | 'webhook_password',
+    value: string,
+  ) => {
+    const clearKey = key === 'webhook_url'
+      ? 'webhook_url_clear'
+      : key === 'webhook_secret'
+        ? 'webhook_secret_clear'
+        : '';
+    setSettings((prev) => {
+      const next = { ...prev, [key]: value };
+      if (value && clearKey) delete next[clearKey];
+      return next;
+    });
+  };
+
   const handleNotificationMethodChange = (value: string) => {
     updateSetting('notification_method', value);
     syncChannelCards(value);
@@ -436,8 +455,31 @@ export default function AdminNotifications() {
   const saveNotificationSettings = async () => {
     const payload = { ...settings };
     delete payload.email_smtp_password_set;
+    delete payload.webhook_url_set;
+    delete payload.webhook_secret_set;
+    delete payload.webhook_headers_set;
+    delete payload.webhook_password_set;
+    delete payload.webhook_url_host;
     if (!payload.email_smtp_password) {
       delete payload.email_smtp_password;
+    }
+    if (payload.webhook_url_clear !== 'true') {
+      delete payload.webhook_url_clear;
+    }
+    if (payload.webhook_secret_clear !== 'true') {
+      delete payload.webhook_secret_clear;
+    }
+    if (!payload.webhook_url && payload.webhook_url_clear !== 'true') {
+      delete payload.webhook_url;
+    }
+    if (!payload.webhook_secret && payload.webhook_secret_clear !== 'true') {
+      delete payload.webhook_secret;
+    }
+    if (!payload.webhook_headers_json) {
+      delete payload.webhook_headers_json;
+    }
+    if (!payload.webhook_password) {
+      delete payload.webhook_password;
     }
     const changedSettings = getChangedSettings(payload, originalSettings);
     if (Object.keys(changedSettings).length === 0) {
@@ -452,13 +494,7 @@ export default function AdminNotifications() {
         body: JSON.stringify(changedSettings),
       });
       if (result.success) {
-        const savedSettings = {
-          ...payload,
-          email_smtp_password: '',
-          email_smtp_password_set: settings.email_smtp_password || settings.email_smtp_password_set === 'true' ? 'true' : 'false',
-        };
-        setSettings(savedSettings);
-        setOriginalSettings(savedSettings);
+        await loadSettingsTab(true);
         toast.success('通知设置已保存');
       } else {
         toast.error(result.error || '保存失败');
@@ -579,11 +615,53 @@ export default function AdminNotifications() {
     }
   };
 
+  const sendTestWebhook = async () => {
+    setTestWebhookSending(true);
+    try {
+      const result = await apiFetch('/admin/test/sendMessage', {
+        method: 'POST',
+        body: JSON.stringify({
+          channel: 'webhook',
+          message: 'CF VPS Monitor 测试消息 - Webhook 通知配置成功!',
+        }),
+      });
+      if (result.success) {
+        toast.success('Webhook 测试消息已发送');
+      } else {
+        toast.error(result.error || '发送失败');
+      }
+    } catch {
+      toast.error('发送失败');
+    } finally {
+      setTestWebhookSending(false);
+    }
+  };
+
   const offlineStatsCount = offlineNotifications.filter((n) => n.enable).length;
   const expiryStatsCount = expiryNotifications.filter((n) => n.enable).length;
   const notificationMethod = settings.notification_method || 'telegram';
-  const notificationMethodLabel = notificationMethod === 'email' ? 'SMTP 邮件' : notificationMethod === 'none' ? '关闭' : 'Telegram';
-  const notificationMethodBadgeColor = notificationMethod === 'email' ? 'blue' : notificationMethod === 'none' ? 'gray' : 'green';
+  const webhookFormat = settings.webhook_format || 'generic';
+  const webhookSecretHint = webhookFormat === 'feishu' || webhookFormat === 'dingtalk'
+    ? '用于平台签名校验'
+    : webhookFormat === 'generic'
+      ? '通用格式用于 HMAC'
+      : webhookFormat === 'custom'
+        ? '自定义模式可留空'
+        : '当前平台通常不需要 Secret';
+  const notificationMethodLabel = notificationMethod === 'email'
+    ? 'SMTP 邮件'
+    : notificationMethod === 'webhook'
+      ? 'Webhook'
+      : notificationMethod === 'none'
+        ? '关闭'
+        : 'Telegram';
+  const notificationMethodBadgeColor = notificationMethod === 'email'
+    ? 'blue'
+    : notificationMethod === 'webhook'
+      ? 'amber'
+      : notificationMethod === 'none'
+        ? 'gray'
+        : 'green';
   const showClientSearch = activeTab === 'offline' || activeTab === 'expiry';
   const headerAction = activeTab === 'settings' ? (
     <Button onClick={saveNotificationSettings} disabled={settingsSaving || tabLoading.settings}>
@@ -675,6 +753,7 @@ export default function AdminNotifications() {
                           <Select.Item value="none">关闭</Select.Item>
                           <Select.Item value="telegram">Telegram</Select.Item>
                           <Select.Item value="email">SMTP 邮件</Select.Item>
+                          <Select.Item value="webhook">Webhook</Select.Item>
                         </Select.Content>
                       </Select.Root>
                       <Badge color={notificationMethodBadgeColor} variant="soft">{notificationMethodLabel}</Badge>
@@ -830,6 +909,170 @@ export default function AdminNotifications() {
                       <Button size="1" className="notification-telegram-test-button" variant="soft" onClick={sendTestMessage}>
                         <Send size={13} /> Telegram 测试
                       </Button>
+                    </div>
+                </SettingCard>
+
+                <SettingCard
+                  title="Webhook 通知"
+                  description="HTTPS 回调地址和消息格式"
+                  open={webhookOpen}
+                  onOpenChange={setWebhookOpen}
+                >
+                    <div className="notification-webhook-form-grid">
+                      <div className="notification-webhook-url-row">
+                        <label className="notification-webhook-field">
+                          <Text className="notification-webhook-field-label" size="2" weight="medium">Webhook URL</Text>
+                          <Text className="notification-webhook-field-description" size="1" color="gray">
+                            {settings.webhook_url_host
+                              ? `当前 Host：${settings.webhook_url_host}`
+                              : settings.webhook_url_set === 'true'
+                                ? '已配置 URL，留空则不修改'
+                                : '仅支持 HTTPS URL'}
+                          </Text>
+                          <TextField.Root
+                            size="2"
+                            value={settings.webhook_url || ''}
+                            onChange={(event) => updateSensitiveWebhookSetting('webhook_url', event.target.value)}
+                            placeholder={settings.webhook_url_set === 'true' ? '已保存 URL，留空则不修改' : 'https://hooks.example.com/...'}
+                          />
+                        </label>
+                      </div>
+                      <div className="notification-webhook-options-grid">
+                        <label className="notification-webhook-field">
+                          <Text className="notification-webhook-field-label" size="2" weight="medium">消息格式</Text>
+                          <Text className="notification-webhook-field-description" size="1" color="gray">选择回调消息格式</Text>
+                          <Select.Root
+                            value={webhookFormat}
+                            onValueChange={(value) => updateSetting('webhook_format', value)}
+                          >
+                            <Select.Trigger style={{ width: '100%' }} />
+                            <Select.Content>
+                              <Select.Item value="generic">通用 JSON</Select.Item>
+                              <Select.Item value="slack">Slack</Select.Item>
+                              <Select.Item value="discord">Discord</Select.Item>
+                              <Select.Item value="feishu">飞书</Select.Item>
+                              <Select.Item value="dingtalk">钉钉</Select.Item>
+                              <Select.Item value="wecom">企业微信</Select.Item>
+                              <Select.Item value="custom">Custom</Select.Item>
+                            </Select.Content>
+                          </Select.Root>
+                        </label>
+                        <div className="notification-webhook-secret">
+                          <label className="notification-webhook-field">
+                            <Text className="notification-webhook-field-label" size="2" weight="medium">Secret</Text>
+                            <Text className="notification-webhook-field-description" size="1" color="gray">{webhookSecretHint}</Text>
+                            <TextField.Root
+                              size="2"
+                              type="password"
+                              value={settings.webhook_secret || ''}
+                              onChange={(event) => updateSensitiveWebhookSetting('webhook_secret', event.target.value)}
+                              placeholder={settings.webhook_secret_set === 'true' ? '已保存 Secret，留空则不修改' : '可选'}
+                            />
+                          </label>
+                        </div>
+                      </div>
+                      <div className="notification-webhook-actions" aria-label="Webhook 操作">
+                        {webhookFormat === 'custom' && (
+                          <div className="notification-webhook-custom-grid">
+                            <label className="notification-webhook-field">
+                              <Text className="notification-webhook-field-label" size="2" weight="medium">请求方法</Text>
+                              <Text className="notification-webhook-field-description" size="1" color="gray">GET 适合 URL 参数类接口，POST 适合请求体模板</Text>
+                              <Select.Root
+                                value={settings.webhook_method || 'POST'}
+                                onValueChange={(value) => updateSetting('webhook_method', value)}
+                              >
+                                <Select.Trigger style={{ width: '100%' }} />
+                                <Select.Content>
+                                  <Select.Item value="POST">POST</Select.Item>
+                                  <Select.Item value="GET">GET</Select.Item>
+                                </Select.Content>
+                              </Select.Root>
+                            </label>
+                            <label className="notification-webhook-field">
+                              <Text className="notification-webhook-field-label" size="2" weight="medium">Content-Type</Text>
+                              <Text className="notification-webhook-field-description" size="1" color="gray">POST custom 请求使用</Text>
+                              <TextField.Root
+                                size="2"
+                                value={settings.webhook_content_type || 'application/json'}
+                                onChange={(event) => updateSetting('webhook_content_type', event.target.value)}
+                                placeholder="application/json"
+                              />
+                            </label>
+                            <label className="notification-webhook-field">
+                              <Text className="notification-webhook-field-label" size="2" weight="medium">重试次数</Text>
+                              <Text className="notification-webhook-field-description" size="1" color="gray">失败时最多重试 3 次</Text>
+                              <Select.Root
+                                value={settings.webhook_retry_count || '1'}
+                                onValueChange={(value) => updateSetting('webhook_retry_count', value)}
+                              >
+                                <Select.Trigger style={{ width: '100%' }} />
+                                <Select.Content>
+                                  <Select.Item value="1">1</Select.Item>
+                                  <Select.Item value="2">2</Select.Item>
+                                  <Select.Item value="3">3</Select.Item>
+                                </Select.Content>
+                              </Select.Root>
+                            </label>
+                            <label className="notification-webhook-field">
+                              <Text className="notification-webhook-field-label" size="2" weight="medium">Basic Auth 用户名</Text>
+                              <Text className="notification-webhook-field-description" size="1" color="gray">不需要认证可留空</Text>
+                              <TextField.Root
+                                size="2"
+                                value={settings.webhook_username || ''}
+                                onChange={(event) => updateSetting('webhook_username', event.target.value)}
+                                placeholder="username"
+                              />
+                            </label>
+                            <label className="notification-webhook-field notification-webhook-wide">
+                              <Text className="notification-webhook-field-label" size="2" weight="medium">Headers JSON</Text>
+                              <Text className="notification-webhook-field-description" size="1" color="gray">
+                                {settings.webhook_headers_set === 'true' ? '已保存 Headers，留空则不修改' : '键和值都必须是字符串，不要同时配置 Authorization 与 Basic Auth'}
+                              </Text>
+                              <TextArea
+                                size="2"
+                                rows={3}
+                                value={settings.webhook_headers_json || ''}
+                                onChange={(event) => updateSensitiveWebhookSetting('webhook_headers_json', event.target.value)}
+                                placeholder='{"X-Token":"token"}'
+                              />
+                            </label>
+                            <label className="notification-webhook-field notification-webhook-wide">
+                              <Text className="notification-webhook-field-label" size="2" weight="medium">Body 模板</Text>
+                              <Text className="notification-webhook-field-description" size="1" color="gray">
+                                {'可用变量：{{title}} {{message}} {{event}} {{client}} {{time}} {{emoji}} {{source}}'}
+                              </Text>
+                              <TextArea
+                                size="2"
+                                rows={4}
+                                value={settings.webhook_body_template || '{"message":"{{message}}","title":"{{title}}"}'}
+                                onChange={(event) => updateSetting('webhook_body_template', event.target.value)}
+                              />
+                            </label>
+                            <label className="notification-webhook-field">
+                              <Text className="notification-webhook-field-label" size="2" weight="medium">Basic Auth 密码</Text>
+                              <Text className="notification-webhook-field-description" size="1" color="gray">
+                                {settings.webhook_password_set === 'true' ? '已保存密码，留空则不修改' : '可选'}
+                              </Text>
+                              <TextField.Root
+                                size="2"
+                                type="password"
+                                value={settings.webhook_password || ''}
+                                onChange={(event) => updateSensitiveWebhookSetting('webhook_password', event.target.value)}
+                                placeholder={settings.webhook_password_set === 'true' ? '已保存密码，留空则不修改' : 'password'}
+                              />
+                            </label>
+                          </div>
+                        )}
+                        <Button
+                          size="1"
+                          className="notification-webhook-test-button"
+                          variant="soft"
+                          onClick={sendTestWebhook}
+                          disabled={testWebhookSending}
+                        >
+                          <Send size={13} /> {testWebhookSending ? '发送中…' : 'Webhook 测试'}
+                        </Button>
+                      </div>
                     </div>
                 </SettingCard>
               </Flex>

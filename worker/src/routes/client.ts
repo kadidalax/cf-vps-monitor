@@ -11,10 +11,9 @@ import { getDatabase } from '../db/provider';
 import { buildAdminSettings } from '../settings/schema';
 import { normalizeMonitorReport, type MonitorReportPayload } from '../utils/monitor-report';
 import { validatePingResults } from '../utils/ping-result';
-import { formatTelegramHtmlText, sendTelegramMessage } from '../utils/telegram';
-import { normalizeRecipients, sendSmtpEmail, type SmtpConfig } from '../utils/email';
 import { buildIpChangeNotification } from '../utils/notification-templates';
 import { bestEffortRecordHealthEvent, errorDetail } from '../utils/observability';
+import { NOTIFICATION_DISPATCH_SETTING_KEYS, dispatchNotification } from '../utils/notification-dispatch';
 import { getCloudflareClientIp, isPublicIpAddress } from '../utils/request-ip';
 import { hashAgentToken, isAgentTokenShape } from '../utils/client';
 import { readAcceptedCount, readClientReportResult, readRateLimitResult } from '../utils/do-response';
@@ -51,18 +50,7 @@ const AGENT_REPORT_RATE_LIMIT_MAX = 120;
 const AGENT_PING_RESULT_RATE_LIMIT_MAX = 180;
 const IP_CHANGE_NOTIFICATION_SETTING_KEYS = [
   'enable_ip_change_notification',
-  'notification_method',
-  'telegram_bot_token',
-  'telegram_chat_id',
-  'email_smtp_host',
-  'email_smtp_port',
-  'email_smtp_security',
-  'email_smtp_username',
-  'email_smtp_password',
-  'email_smtp_from_address',
-  'email_smtp_from_name',
-  'email_smtp_recipients',
-  'email_smtp_auth_method',
+  ...NOTIFICATION_DISPATCH_SETTING_KEYS,
 ];
 const AGENT_POLICY_SETTING_KEYS = [
   'live_poll_active_interval_sec',
@@ -596,38 +584,9 @@ async function recordIpChangeIfEnabled(database: db.QueryDatabase, clientName: s
 
   const notification = buildIpChangeNotification({ nodeName: clientName, parts });
   const adminSettings = buildAdminSettings(settings);
-  if (adminSettings.notification_method === 'email') {
-    try {
-      const config: SmtpConfig = {
-        host: adminSettings.email_smtp_host,
-        port: Number(adminSettings.email_smtp_port || 587),
-        security: adminSettings.email_smtp_security === 'tls' ? 'tls' : 'starttls',
-        username: adminSettings.email_smtp_username,
-        password: adminSettings.email_smtp_password,
-        fromAddress: adminSettings.email_smtp_from_address,
-        fromName: adminSettings.email_smtp_from_name || 'CF VPS Monitor',
-        recipients: normalizeRecipients(adminSettings.email_smtp_recipients),
-        authMethod: adminSettings.email_smtp_auth_method === 'login' ? 'login' : 'plain',
-      };
-      await sendSmtpEmail(config, notification.subject, notification.body);
-    } catch (error) {
-      await bestEffortRecordHealthEvent(database, 'email', 'error', `SMTP IP change notification failed: ${errorDetail(error)}`, {
-        auditAction: 'email_error',
-      });
-    }
-  } else if (adminSettings.notification_method !== 'none') {
-    const botToken = adminSettings.telegram_bot_token;
-    const chatId = adminSettings.telegram_chat_id;
-    if (botToken && chatId) {
-      try {
-        await sendTelegramMessage(botToken, {
-          chat_id: chatId,
-          text: formatTelegramHtmlText(notification.body),
-          parse_mode: 'HTML',
-        });
-      } catch { /* best effort */ }
-    }
-  }
+  await dispatchNotification(database, adminSettings, notification, {
+    deps: { recordHealth: bestEffortRecordHealthEvent },
+  });
 
   await db.insertAuditLog(database, 'system', 'ip_change',
     `IP 变更: ${clientName} ${parts.join(', ')}`);

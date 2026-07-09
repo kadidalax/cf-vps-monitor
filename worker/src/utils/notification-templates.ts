@@ -1,6 +1,11 @@
 export type NotificationMessage = {
   subject: string;
   body: string;
+  event?: string;
+  clients?: string;
+  message?: string;
+  time?: string;
+  emoji?: string;
 };
 
 function pad2(value: number): string {
@@ -23,8 +28,8 @@ export function formatNotificationTime(value: string | Date): string {
   ].join(':');
 }
 
-function message(subject: string, lines: string[]): NotificationMessage {
-  return { subject, body: lines.join('\n') };
+function message(subject: string, lines: string[], meta: Omit<NotificationMessage, 'subject' | 'body'> = {}): NotificationMessage {
+  return { subject, body: lines.join('\n'), ...meta };
 }
 
 function eventMessage(input: {
@@ -35,13 +40,20 @@ function eventMessage(input: {
   time?: string | Date;
 }): NotificationMessage {
   const subject = `${input.emoji} CF VPS Monitor ${input.event}`;
+  const time = formatNotificationTime(input.time || new Date());
   return message(subject, [
     input.emoji.repeat(3),
     `事件: ${input.event}`,
     ...(input.clients ? [`节点: ${input.clients}`] : []),
     `消息: ${input.message}`,
     `时间: ${formatNotificationTime(input.time || new Date())}`,
-  ]);
+  ], {
+    emoji: input.emoji,
+    event: input.event,
+    clients: input.clients || '',
+    message: input.message,
+    time,
+  });
 }
 
 export function buildOfflineNotification(input: {

@@ -39,6 +39,19 @@ export function formatBillingCycle(cycle?: number): string {
   return `${value}天`;
 }
 
+export function getExpiryInfo(expired_at?: string | number, nowMs = Date.now()): { label: string; color: string } {
+  if (!expired_at) return { label: '', color: 'gray' };
+  const expiredTime = new Date(expired_at).getTime();
+  if (!Number.isFinite(expiredTime)) return { label: '', color: 'gray' };
+
+  const diffDays = Math.ceil((expiredTime - nowMs) / (1000 * 60 * 60 * 24));
+  if (diffDays <= 0) return { label: '已到期', color: 'red' };
+  if (diffDays > 36500) return { label: '长期', color: 'green' };
+  if (diffDays > 30) return { label: `剩 ${diffDays}天`, color: 'green' };
+  if (diffDays >= 7) return { label: `剩 ${diffDays}天`, color: 'yellow' };
+  return { label: `剩 ${diffDays}天`, color: 'red' };
+}
+
 export function getLongTermDateValue(): string {
   const futureDate = new Date();
   futureDate.setFullYear(futureDate.getFullYear() + 200);

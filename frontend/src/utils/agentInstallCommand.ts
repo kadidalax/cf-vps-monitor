@@ -1,10 +1,11 @@
 import { CF_MONITOR_REPOSITORY } from './projectLinks';
 
-export type AgentInstallPlatform = 'linux' | 'windows' | 'macos';
+export type AgentInstallPlatform = 'unix' | 'windows';
 
 export type AgentInstallOptions = {
   ghproxy: string;
   downloadProxy: string;
+  installMode: 'auto' | 'system' | 'user';
   dir: string;
   serviceName: string;
   binaryUrl?: string;
@@ -21,6 +22,7 @@ export type AgentInstallOptions = {
 export const defaultAgentInstallOptions: AgentInstallOptions = {
   ghproxy: '',
   downloadProxy: '',
+  installMode: 'auto',
   dir: '',
   serviceName: '',
   binaryUrl: '',
@@ -120,7 +122,7 @@ export function cfMonitorAgentScriptRefFromRevision(revision?: string | null) {
 }
 
 export function cfMonitorAgentScriptUrl(
-  scriptFile: 'install-linux.sh' | 'install-windows.ps1',
+  scriptFile: 'install.sh' | 'install-linux.sh' | 'install-windows.ps1',
   ghproxy = '',
   releaseTag = '',
   scriptRef = '',
@@ -136,9 +138,7 @@ export function cfMonitorAgentScriptUrl(
 export function cfMonitorAgentBinaryUrl(platform: AgentInstallPlatform, ghproxy = '') {
   const file = platform === 'windows'
     ? 'cf-vps-monitor-agent-windows-amd64.exe'
-    : platform === 'macos'
-      ? 'cf-vps-monitor-agent-darwin-amd64'
-      : 'cf-vps-monitor-agent-linux-amd64';
+    : 'cf-vps-monitor-agent-linux-amd64';
   return proxiedUrl(`${CF_MONITOR_RELEASE_BASE}/${file}`, ghproxy);
 }
 
@@ -165,9 +165,8 @@ function normalizeInstanceId(value?: string) {
   return (cleaned || 'default').slice(0, 48);
 }
 
-function sudoBashPipe(downloadCommand: string, args: string[]) {
-  const quotedArgs = args.map(shellQuote).join(' ');
-  return `${downloadCommand} | { SUDO=; [ "$(id -u)" -eq 0 ] || SUDO=sudo; $SUDO bash -s -- ${quotedArgs}; }`;
+function shPipe(downloadCommand: string, args: string[]) {
+  return `${downloadCommand} | sh -s -- ${args.map(shellQuote).join(' ')}`;
 }
 
 export function buildAgentInstallCommand({
@@ -190,6 +189,7 @@ export function buildAgentInstallCommand({
   const { binaryUrl, checksumUrl } = customAgentDownloadUrls(options.binaryUrl, options.checksumUrl);
   const releaseTag = normalizeReleaseTag(options.releaseTag);
   const scriptRef = options.scriptRef?.trim();
+  const installMode = ['system', 'user'].includes(options.installMode) ? options.installMode : '';
   const dir = options.dir.trim();
   const serviceName = options.serviceName.trim();
   const effectiveInstanceId = normalizeInstanceId(instanceId || nodeName);
@@ -201,11 +201,12 @@ export function buildAgentInstallCommand({
   const trafficResetDay = normalizeTrafficResetDay(options.trafficResetDay);
 
   switch (platform) {
-    case 'linux': {
+    case 'unix': {
       const args = ['-s', serverUrl, '-t', token || '<TOKEN>'];
       if (trafficResetDay !== '1') args.push('-r', trafficResetDay);
       if (effectiveNodeName) args.push('-n', effectiveNodeName);
       args.push('-i', effectiveInstanceId);
+      if (installMode) args.push('--install-mode', installMode);
       if (binaryUrl) args.push('--binary-url', binaryUrl);
       if (checksumUrl) args.push('--checksum-url', checksumUrl);
       if (releaseTag && !binaryUrl) args.push('--release-tag', releaseTag);
@@ -217,8 +218,8 @@ export function buildAgentInstallCommand({
       if (mountExclude) args.push('--mount-exclude', mountExclude);
       if (nicInclude) args.push('--nic-include', nicInclude);
       if (nicExclude) args.push('--nic-exclude', nicExclude);
-      return sudoBashPipe(
-        `wget -qO- ${shellQuote(cfMonitorAgentScriptUrl('install-linux.sh', ghproxy, releaseTag, scriptRef))}`,
+      return shPipe(
+        `wget -qO- ${shellQuote(cfMonitorAgentScriptUrl('install.sh', ghproxy, releaseTag, scriptRef))}`,
         args,
       );
     }
@@ -241,27 +242,6 @@ export function buildAgentInstallCommand({
       return 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ' +
         `"iwr ${psQuote(cfMonitorAgentScriptUrl('install-windows.ps1', ghproxy, releaseTag, scriptRef))} -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\\install-windows.ps1' ${args.map((arg, index) => index % 2 === 0 ? arg : psQuote(arg)).join(' ')}"`;
     }
-    case 'macos': {
-      const args = ['-s', serverUrl, '-t', token || '<TOKEN>'];
-      if (trafficResetDay !== '1') args.push('-r', trafficResetDay);
-      if (effectiveNodeName) args.push('-n', effectiveNodeName);
-      args.push('-i', effectiveInstanceId);
-      if (binaryUrl) args.push('--binary-url', binaryUrl);
-      if (checksumUrl) args.push('--checksum-url', checksumUrl);
-      if (releaseTag && !binaryUrl) args.push('--release-tag', releaseTag);
-      if (ghproxy) args.push('--install-ghproxy', ghproxy);
-      if (downloadProxy) args.push('--proxy', downloadProxy);
-      if (dir) args.push('--install-dir', dir);
-      if (serviceName) args.push('--service-name', serviceName);
-      if (mountInclude) args.push('--mount-include', mountInclude);
-      if (mountExclude) args.push('--mount-exclude', mountExclude);
-      if (nicInclude) args.push('--nic-include', nicInclude);
-      if (nicExclude) args.push('--nic-exclude', nicExclude);
-      return sudoBashPipe(
-        `curl -fsSL ${shellQuote(cfMonitorAgentScriptUrl('install-linux.sh', ghproxy, releaseTag, scriptRef))}`,
-        args,
-      );
-    }
     default:
       return '';
   }
@@ -277,21 +257,16 @@ export function buildAgentUninstallAllCommand({
   scriptRef?: string;
 }) {
   const proxy = normalizeProxyUrl(ghproxy);
-  const scriptUrl = (file: 'install-linux.sh' | 'install-windows.ps1') =>
+  const scriptUrl = (file: 'install.sh' | 'install-windows.ps1') =>
     cfMonitorAgentScriptUrl(file, proxy, '', scriptRef);
   switch (platform) {
     case 'windows':
       return 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ' +
         `"iwr ${psQuote(scriptUrl('install-windows.ps1'))} -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\\install-windows.ps1' -UninstallAll -Yes"`;
-    case 'macos':
-      return sudoBashPipe(
-        `curl -fsSL ${shellQuote(scriptUrl('install-linux.sh'))}`,
-        ['--uninstall-all', '--yes', ...(proxy ? ['--install-ghproxy', proxy] : [])],
-      );
-    case 'linux':
+    case 'unix':
     default:
-      return sudoBashPipe(
-        `wget -qO- ${shellQuote(scriptUrl('install-linux.sh'))}`,
+      return shPipe(
+        `wget -qO- ${shellQuote(scriptUrl('install.sh'))}`,
         ['--uninstall-all', '--yes', ...(proxy ? ['--install-ghproxy', proxy] : [])],
       );
   }

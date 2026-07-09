@@ -64,7 +64,9 @@ jobs:
           build linux arm64 cf-vps-monitor-agent-linux-arm64
           build darwin amd64 cf-vps-monitor-agent-darwin-amd64
           build darwin arm64 cf-vps-monitor-agent-darwin-arm64
+          build freebsd amd64 cf-vps-monitor-agent-freebsd-amd64
           build windows amd64 cf-vps-monitor-agent-windows-amd64.exe
+          cp install.sh dist/install.sh
           cp install-linux.sh dist/install-linux.sh
           cp install-windows.ps1 dist/install-windows.ps1
           (cd dist && sha256sum * > SHA256SUMS)

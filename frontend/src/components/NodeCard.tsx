@@ -12,6 +12,7 @@ import { getOSDisplay } from '../utils/osIcon';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { formatCpuCardLabel, formatCpuSpec } from '../utils/cpuFormat';
 import { parseMonitorTags } from '../utils/tags';
+import { getExpiryInfo } from '../utils/billing';
 
 interface NodeCardProps {
   client: ClientInfo;
@@ -260,7 +261,7 @@ export default function NodeCard({ client, live, online, includeHidden = false }
     }
   })();
   const trafficPct = client.traffic_limit > 0 ? Math.min(100, (trafficUsed / client.traffic_limit) * 100) : undefined;
-  const hasBillingInfo = client.price !== undefined && client.price !== 0;
+  const hasBillingInfo = (client.price !== undefined && client.price !== 0) || Boolean(getExpiryInfo(client.expired_at).label);
   const handleCardLinkClick = (event: React.MouseEvent<HTMLAnchorElement>) => {
     const target = event.target as HTMLElement | null;
     if (target?.closest('[data-node-card-action="true"]')) {
@@ -336,8 +337,9 @@ export default function NodeCard({ client, live, online, includeHidden = false }
                 price={client.price}
                 billing_cycle={client.billing_cycle}
                 currency={client.currency}
+                expired_at={client.expired_at}
                 showTags={false}
-                showExpiry={false}
+                showExpiry
               />
             </span>
             <NodeIpBadges client={client} className="node-card-title-ip-badges" />
@@ -350,15 +352,16 @@ export default function NodeCard({ client, live, online, includeHidden = false }
               <div className="node-card-system-main">
                 <Flex align="center" gap="1" style={{ minWidth: 0 }}>
                   <img src={osConfig.image} alt={osConfig.name} style={{ width: 16, height: 16 }} />
-                  <Text size="1" truncate>{osConfig.name} / {client.arch || '-'}</Text>
+                  <Text size="1" truncate>{osConfig.name}</Text>
                 </Flex>
                 <span className="node-card-billing-row node-card-system-billing-row" aria-hidden={!hasBillingInfo}>
                   <PriceTags
                     price={client.price}
                     billing_cycle={client.billing_cycle}
                     currency={client.currency}
+                    expired_at={client.expired_at}
                     showTags={false}
-                    showExpiry={false}
+                    showExpiry
                   />
                 </span>
               </div>

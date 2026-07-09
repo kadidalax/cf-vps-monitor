@@ -1,6 +1,6 @@
 {
   "name": "cf-vps-monitor",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Cloudflare Worker VPS monitor system",
   "license": "MIT",
   "type": "module",

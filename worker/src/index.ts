@@ -21,9 +21,8 @@ import { validateAdminSession } from './auth/admin-session';
 import { AuthConfigurationError, verifyAdminToken, type AdminJwtPayload } from './auth/jwt';
 import { getAdminSessionToken, verifyAdminCsrfToken } from './auth/session';
 import { buildAdminSettings } from './settings/schema';
-import { formatTelegramHtmlText, sendTelegramMessage } from './utils/telegram';
-import { normalizeRecipients, sendSmtpEmail, type SmtpConfig } from './utils/email';
 import { bestEffortRecordHealthEvent, errorDetail } from './utils/observability';
+import { NOTIFICATION_DISPATCH_SETTING_KEYS, dispatchNotification } from './utils/notification-dispatch';
 import { clearScheduledDatabaseStartupFailure, recordScheduledDatabaseStartupFailure } from './utils/scheduled-observability';
 import { sanitizeSetupDiagnosticDetail } from './utils/setup-diagnostics';
 import { getCloudflareClientIp } from './utils/request-ip';
@@ -145,6 +144,7 @@ function canServeWithoutDatabaseStartup(pathname: string): boolean {
     pathname === '/api/setup/status' ||
     pathname === '/api/setup/database/init' ||
     pathname === '/api/version' ||
+    pathname === '/agent/install.sh' ||
     pathname === '/agent/install-linux.sh' ||
     pathname === '/agent/install-windows.ps1' ||
     pathname === '/api/login' ||
@@ -266,6 +266,7 @@ app.use('/api/*', async (c, next) => {
   return undefined;
 });
 
+app.get('/agent/install.sh', (c) => c.redirect('https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/agent/install.sh', 302));
 app.get('/agent/install-linux.sh', (c) => c.redirect('https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/agent/install-linux.sh', 302));
 app.get('/agent/install-windows.ps1', (c) => c.redirect('https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/agent/install-windows.ps1', 302));
 
@@ -381,18 +382,7 @@ type ScheduledSettings = Record<string, string>;
 type ScheduledAdminSettings = ReturnType<typeof buildAdminSettings>;
 type ScheduledMonitorClient = ScheduledClientRow;
 const SCHEDULED_SETTING_KEYS = [
-  'notification_method',
-  'telegram_bot_token',
-  'telegram_chat_id',
-  'email_smtp_host',
-  'email_smtp_port',
-  'email_smtp_security',
-  'email_smtp_username',
-  'email_smtp_password',
-  'email_smtp_from_address',
-  'email_smtp_from_name',
-  'email_smtp_recipients',
-  'email_smtp_auth_method',
+  ...NOTIFICATION_DISPATCH_SETTING_KEYS,
   'record_preserve_time',
   'ping_record_preserve_time',
   'audit_log_preserve_time',
@@ -458,88 +448,11 @@ export function createScheduledRunContext(env: Bindings): ScheduledRunContext {
   };
 }
 
-async function sendTelegram(context: ScheduledRunContext, text: string, settings: ScheduledAdminSettings): Promise<boolean> {
-  const botToken = settings['telegram_bot_token'];
-  const chatId = settings['telegram_chat_id'];
-  if (!botToken || !chatId) {
-    await bestEffortRecordHealthEvent(context.database, 'telegram', 'disabled', 'telegram credentials are not configured');
-    return false;
-  }
-
-  try {
-    const response = await sendTelegramMessage(botToken, {
-      chat_id: chatId,
-      text: formatTelegramHtmlText(text),
-      parse_mode: 'HTML',
-      disable_web_page_preview: true,
-    });
-
-    if (!response.ok) {
-      await bestEffortRecordHealthEvent(
-        context.database,
-        'telegram',
-        'error',
-        `Telegram HTTP ${response.status}`,
-        { auditAction: 'telegram_error' },
-      );
-      return false;
-    }
-
-    await bestEffortRecordHealthEvent(context.database, 'telegram', 'ok', 'Telegram message sent', {
-      successThrottleMs: 60 * 60 * 1000,
-    });
-    return true;
-  } catch (error) {
-    await bestEffortRecordHealthEvent(
-      context.database,
-      'telegram',
-      'error',
-      `Telegram send failed: ${errorDetail(error)}`,
-      { auditAction: 'telegram_error' },
-    );
-    return false;
-  }
-}
-
 async function sendNotification(context: ScheduledRunContext, notification: NotificationMessage): Promise<boolean> {
   const settings = await context.getAdminSettings();
-  switch (settings.notification_method) {
-    case 'none':
-      await bestEffortRecordHealthEvent(context.database, 'notification', 'disabled', 'notification_method is none');
-      return false;
-    case 'email': {
-      try {
-        const config: SmtpConfig = {
-          host: settings.email_smtp_host,
-          port: Number(settings.email_smtp_port || 587),
-          security: settings.email_smtp_security === 'tls' ? 'tls' : 'starttls',
-          username: settings.email_smtp_username,
-          password: settings.email_smtp_password,
-          fromAddress: settings.email_smtp_from_address,
-          fromName: settings.email_smtp_from_name || 'CF VPS Monitor',
-          recipients: normalizeRecipients(settings.email_smtp_recipients),
-          authMethod: settings.email_smtp_auth_method === 'login' ? 'login' : 'plain',
-        };
-        const result = await sendSmtpEmail(config, notification.subject, notification.body);
-        if (result.ok) {
-          await bestEffortRecordHealthEvent(context.database, 'email', 'ok', 'SMTP notification sent', {
-            successThrottleMs: 60 * 60 * 1000,
-          });
-          return true;
-        }
-        await bestEffortRecordHealthEvent(context.database, 'email', 'error', `SMTP send failed: ${result.error}`, {
-          auditAction: 'email_error',
-        });
-      } catch (error) {
-        await bestEffortRecordHealthEvent(context.database, 'email', 'error', `SMTP send failed: ${errorDetail(error)}`, {
-          auditAction: 'email_error',
-        });
-      }
-      return false;
-    }
-    default:
-      return sendTelegram(context, notification.body, settings);
-  }
+  return dispatchNotification(context.database, settings, notification, {
+    deps: { recordHealth: bestEffortRecordHealthEvent },
+  });
 }
 
 async function runRecordCleanup(context: ScheduledRunContext, now: Date): Promise<void> {

@@ -378,7 +378,7 @@ function SortableNodeCard({ node, selected, onSelect, liveData, onDetail, onEdit
 
 function GenerateCommandDialog({ client, open, onOpenChange }: { client: CommandClient; open: boolean; onOpenChange: (v: boolean) => void }) {
   const apiFetch = useApi();
-  const [platform, setPlatform] = useState<AgentInstallPlatform>('linux');
+  const [platform, setPlatform] = useState<AgentInstallPlatform>('unix');
   const [serverUrl, setServerUrl] = useState('');
   const [installOptions, setInstallOptions] = useState<AgentInstallOptions>(defaultAgentInstallOptions);
   const [agentToken, setAgentToken] = useState('');
@@ -459,18 +459,28 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: Command
         <Dialog.Title>生成 CF VPS Monitor Agent 安装命令</Dialog.Title>
         <Dialog.Description size="2" mb="2">节点: {client.name}</Dialog.Description>
         <SegmentedControl.Root value={platform} onValueChange={(v) => setPlatform(v as AgentInstallPlatform)} style={{ marginBottom: 12 }}>
-          <SegmentedControl.Item value="linux">Linux</SegmentedControl.Item>
+          <SegmentedControl.Item value="unix">Unix 自动检测</SegmentedControl.Item>
           <SegmentedControl.Item value="windows">Windows</SegmentedControl.Item>
-          <SegmentedControl.Item value="macos">macOS</SegmentedControl.Item>
         </SegmentedControl.Root>
 
         <Flex className="admin-command-options-scroll" direction="column" gap="3">
           <FieldInput label="连接地址" value={serverUrl} onChange={setServerUrl} placeholder={window.location.origin} />
           <Text size="2" weight="bold">安装选项</Text>
           <div className="install-options-grid">
+            <label>
+              <Text size="2" weight="bold" style={{ display: 'block', marginBottom: 4 }}>安装模式</Text>
+              <Select.Root value={installOptions.installMode} onValueChange={(v) => setOption('installMode', v as AgentInstallOptions['installMode'])}>
+                <Select.Trigger style={{ width: '100%' }} />
+                <Select.Content>
+                  <Select.Item value="auto">自动选择</Select.Item>
+                  <Select.Item value="system">系统服务</Select.Item>
+                  <Select.Item value="user">用户模式</Select.Item>
+                </Select.Content>
+              </Select.Root>
+            </label>
             <FieldInput label="GitHub 代理" value={installOptions.ghproxy} onChange={(v) => setOption('ghproxy', v)} placeholder="为空则不使用代理" />
             <FieldInput label="下载代理" value={installOptions.downloadProxy} onChange={(v) => setOption('downloadProxy', v)} placeholder="例如 http://127.0.0.1:10808" />
-            <FieldInput label="安装目录" value={installOptions.dir} onChange={(v) => setOption('dir', v)} placeholder={platform === 'windows' ? 'C:\\Program Files\\CF VPS Monitor' : '/opt/cf-vps-monitor'} />
+            <FieldInput label="安装目录" value={installOptions.dir} onChange={(v) => setOption('dir', v)} placeholder={platform === 'windows' ? 'C:\\Program Files\\CF VPS Monitor' : '自动选择系统目录或用户目录'} />
             <FieldInput label="服务名称" value={installOptions.serviceName} onChange={(v) => setOption('serviceName', v)} placeholder={platform === 'windows' ? 'CFVpsMonitorAgent' : 'cf-vps-monitor-agent'} />
             <FieldInput label="二进制下载地址" value={installOptions.binaryUrl || ''} onChange={(v) => setOption('binaryUrl', v)} placeholder="为空则自动下载预编译二进制" />
             <FieldInput label="SHA256SUMS 地址" value={installOptions.checksumUrl || ''} onChange={(v) => setOption('checksumUrl', v)} placeholder="自定义二进制地址必须填写" />
