@@ -19,6 +19,8 @@ export const HEALTH_COMPONENTS = [
   'do_record_persistence',
   'ping_persistence',
   'telegram',
+  'email',
+  'webhook',
   'cron_cleanup',
   'cron_load',
   'cron_offline',

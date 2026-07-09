@@ -880,6 +880,46 @@ func TestLinuxServiceAllowsIcmpPingCapability(t *testing.T) {
 	}
 }
 
+func TestUniversalInstallerSupportsOpenRCAndUserMode(t *testing.T) {
+	raw, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatalf("read install.sh: %v", err)
+	}
+	script := string(raw)
+	for _, want := range []string{
+		"#!/bin/sh",
+		"rc-update add",
+		"rc-service",
+		"nohup",
+		"crontab",
+		"cf-vps-monitor:",
+		"freebsd",
+		"install_mode",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("install.sh missing %s", want)
+		}
+	}
+}
+
+func TestAgentReleasePublishesUniversalInstallerAndFreeBSD(t *testing.T) {
+	raw, err := os.ReadFile("../.github/workflows/release-agent.yml")
+	if err != nil {
+		t.Fatalf("read release-agent.yml: %v", err)
+	}
+	workflow := string(raw)
+	for _, want := range []string{
+		"build freebsd amd64 cf-vps-monitor-agent-freebsd-amd64",
+		"cp install.sh dist/install.sh",
+		"cp install-linux.sh dist/install-linux.sh",
+		"SHA256SUMS",
+	} {
+		if !strings.Contains(workflow, want) {
+			t.Fatalf("release-agent.yml missing %s", want)
+		}
+	}
+}
+
 func TestExecuteTCPPingExcludesDNSResolutionTime(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -26,8 +26,10 @@ import { getCloudflareClientIp } from '../utils/request-ip';
 import { validatePingTaskInput } from '../utils/ping-task';
 import { generateAgentToken, validateClientCreateInput, validateClientUpdateInput } from '../utils/client';
 import { validateExpiryNotificationInput, validateLoadNotificationInput, validateOfflineNotificationInput } from '../utils/notification';
-import { TELEGRAM_MESSAGE_MAX_CHARS, formatTelegramHtmlText, sendTelegramMessage } from '../utils/telegram';
-import { EMAIL_MESSAGE_MAX_CHARS, normalizeRecipients, sendSmtpEmail, type SmtpConfig } from '../utils/email';
+import { NOTIFICATION_DISPATCH_SETTING_KEYS, dispatchNotification } from '../utils/notification-dispatch';
+import { TELEGRAM_MESSAGE_MAX_CHARS } from '../utils/telegram';
+import { EMAIL_MESSAGE_MAX_CHARS } from '../utils/email';
+import { WEBHOOK_MESSAGE_MAX_CHARS } from '../utils/webhook';
 import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { checkWebsiteMonitorHttp, validateWebsiteMonitorInput } from '../utils/website-monitor';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
@@ -134,6 +136,16 @@ const SETTINGS_SCOPE_KEYS = {
     'email_smtp_from_name',
     'email_smtp_recipients',
     'email_smtp_auth_method',
+    'webhook_url',
+    'webhook_format',
+    'webhook_secret',
+    'webhook_method',
+    'webhook_content_type',
+    'webhook_headers_json',
+    'webhook_body_template',
+    'webhook_username',
+    'webhook_password',
+    'webhook_retry_count',
     'enable_ip_change_notification',
     'offline_notify_never_reported',
   ],
@@ -145,21 +157,6 @@ const MAINTENANCE_CLEANUP_SETTING_KEYS = [
   'record_preserve_time',
   'ping_record_preserve_time',
   'audit_log_preserve_time',
-];
-const TELEGRAM_CREDENTIAL_SETTING_KEYS = [
-  'telegram_bot_token',
-  'telegram_chat_id',
-];
-const EMAIL_CREDENTIAL_SETTING_KEYS = [
-  'email_smtp_host',
-  'email_smtp_port',
-  'email_smtp_security',
-  'email_smtp_username',
-  'email_smtp_password',
-  'email_smtp_from_address',
-  'email_smtp_from_name',
-  'email_smtp_recipients',
-  'email_smtp_auth_method',
 ];
 const EMPTY_AGENT_PING_TASK_POLL_SEC = 600;
 const DEFAULT_UNIFIED_PING_INTERVAL_SEC = 120;
@@ -242,6 +239,14 @@ function isUploadedFile(value: unknown): value is { arrayBuffer(): Promise<Array
   return !!value && typeof value === 'object' && 'arrayBuffer' in value && typeof value.arrayBuffer === 'function';
 }
 
+function webhookUrlHost(value: string): string {
+  try {
+    return value ? new URL(value).hostname.toLowerCase() : '';
+  } catch {
+    return '';
+  }
+}
+
 function detectSiteLogoType(bytes: Uint8Array): string | null {
   if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
   if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
@@ -251,24 +256,6 @@ function detectSiteLogoType(bytes: Uint8Array): string | null {
     bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
   ) return 'image/webp';
   return null;
-}
-
-function summarizeTelegramTestResult(response: Response, result: unknown): {
-  ok: boolean;
-  status: number;
-  error_code?: number;
-} {
-  const summary: { ok: boolean; status: number; error_code?: number } = {
-    ok: isJsonObjectBody(result) && result.ok === true,
-    status: response.status,
-  };
-  if (isJsonObjectBody(result)) {
-    const errorCode = Number(result.error_code);
-    if (Number.isInteger(errorCode) && errorCode > 0) {
-      summary.error_code = errorCode;
-    }
-  }
-  return summary;
 }
 
 function isJsonObjectArrayBody(value: unknown): value is Record<string, unknown>[] {
@@ -2184,7 +2171,16 @@ adminRoutes.get('/settings', async (c) => {
     const scoped = Object.fromEntries(keys.map((key) => [key, settings[key]]));
     if (scope === 'notification') {
       scoped.email_smtp_password_set = settings.email_smtp_password ? 'true' : 'false';
+      scoped.webhook_url_set = settings.webhook_url ? 'true' : 'false';
+      scoped.webhook_secret_set = settings.webhook_secret ? 'true' : 'false';
+      scoped.webhook_headers_set = settings.webhook_headers_json ? 'true' : 'false';
+      scoped.webhook_password_set = settings.webhook_password ? 'true' : 'false';
+      scoped.webhook_url_host = webhookUrlHost(settings.webhook_url);
       delete scoped['email_smtp_password'];
+      delete scoped['webhook_url'];
+      delete scoped['webhook_secret'];
+      delete scoped['webhook_headers_json'];
+      delete scoped['webhook_password'];
     }
     if (!fresh) adminSettingsScopeCache.set(scope, { value: scoped, expiresAt: Date.now() + ADMIN_SETTINGS_SCOPE_CACHE_MS });
     return c.json(scoped);
@@ -2203,9 +2199,24 @@ adminRoutes.post('/settings', async (c) => {
     const database = getDatabase(c.env);
     const settingsBody = { ...body };
     delete settingsBody.email_smtp_password_set;
+    delete settingsBody.webhook_url_set;
+    delete settingsBody.webhook_secret_set;
+    delete settingsBody.webhook_headers_set;
+    delete settingsBody.webhook_password_set;
+    delete settingsBody.webhook_url_host;
+    const clearWebhookUrl = settingsBody.webhook_url_clear === true || settingsBody.webhook_url_clear === 'true';
+    const clearWebhookSecret = settingsBody.webhook_secret_clear === true || settingsBody.webhook_secret_clear === 'true';
+    delete settingsBody.webhook_url_clear;
+    delete settingsBody.webhook_secret_clear;
     if (settingsBody.email_smtp_password === '') {
       delete settingsBody.email_smtp_password;
     }
+    if (clearWebhookUrl) settingsBody.webhook_url = '';
+    else if (settingsBody.webhook_url === '') delete settingsBody.webhook_url;
+    if (clearWebhookSecret) settingsBody.webhook_secret = '';
+    else if (settingsBody.webhook_secret === '') delete settingsBody.webhook_secret;
+    if (settingsBody.webhook_headers_json === '') delete settingsBody.webhook_headers_json;
+    if (settingsBody.webhook_password === '') delete settingsBody.webhook_password;
     const normalized = sanitizeSettingsForStorage(settingsBody);
     if (!normalized.ok) {
       return c.json({ error: '设置校验失败', details: normalized.errors }, 400);
@@ -2802,104 +2813,48 @@ adminRoutes.post('/test/sendMessage', async (c) => {
     const requestedChannel = typeof body.channel === 'string' && body.channel.trim() !== ''
       ? body.channel.trim()
       : undefined;
-    const adminSettings = buildAdminSettings(await db.getSettingsByKeys(database, [
-      'notification_method',
-      ...TELEGRAM_CREDENTIAL_SETTING_KEYS,
-      ...EMAIL_CREDENTIAL_SETTING_KEYS,
-    ]));
+    const adminSettings = buildAdminSettings(await db.getSettingsByKeys(database, [...NOTIFICATION_DISPATCH_SETTING_KEYS]));
     selectedChannel = requestedChannel || adminSettings.notification_method;
-
-    if (selectedChannel === 'email') {
-      if (message.length > EMAIL_MESSAGE_MAX_CHARS) {
-        return c.json({ error: `测试消息不能超过 ${EMAIL_MESSAGE_MAX_CHARS} 个字符` }, 400);
-      }
-      let recipients: string[];
-      try {
-        recipients = typeof body.test_recipient === 'string' && body.test_recipient.trim() !== ''
-          ? normalizeRecipients(body.test_recipient)
-          : normalizeRecipients(adminSettings.email_smtp_recipients);
-      } catch (error) {
-        return c.json({ error: errorDetail(error) }, 400);
-      }
-      const config: SmtpConfig = {
-        host: adminSettings.email_smtp_host,
-        port: Number(adminSettings.email_smtp_port || 587),
-        security: adminSettings.email_smtp_security === 'tls' ? 'tls' : 'starttls',
-        username: adminSettings.email_smtp_username,
-        password: adminSettings.email_smtp_password,
-        fromAddress: adminSettings.email_smtp_from_address,
-        fromName: adminSettings.email_smtp_from_name || 'CF VPS Monitor',
-        recipients,
-        authMethod: adminSettings.email_smtp_auth_method === 'login' ? 'login' : 'plain',
-      };
-      const result = await sendSmtpEmail(config, 'CF VPS Monitor 测试邮件', message);
-      if (result.ok) {
-        await bestEffortRecordHealthEvent(database, 'email', 'ok', 'SMTP test email sent');
-        return c.json({ success: true });
-      }
-      await bestEffortRecordHealthEvent(
-        database,
-        'email',
-        'error',
-        `SMTP test failed: ${result.error}`,
-        { auditAction: 'email_error', auditUser: c.get('username') || 'system' },
-      );
-      return c.json({ success: false, error: result.error }, 502);
+    if (!['telegram', 'email', 'webhook', 'none'].includes(selectedChannel)) {
+      return c.json({ error: '未知通知方式' }, 400);
+    }
+    const maxMessageChars = selectedChannel === 'email'
+      ? EMAIL_MESSAGE_MAX_CHARS
+      : selectedChannel === 'webhook'
+        ? WEBHOOK_MESSAGE_MAX_CHARS
+        : TELEGRAM_MESSAGE_MAX_CHARS;
+    if (selectedChannel !== 'none' && message.length > maxMessageChars) {
+      return c.json({ error: `测试消息不能超过 ${maxMessageChars} 个字符` }, 400);
     }
 
-    if (message.length > TELEGRAM_MESSAGE_MAX_CHARS) {
-      return c.json({ error: `测试消息不能超过 ${TELEGRAM_MESSAGE_MAX_CHARS} 个字符` }, 400);
+    if (selectedChannel === 'email' && typeof body.test_recipient === 'string' && body.test_recipient.trim() !== '') {
+      adminSettings.email_smtp_recipients = body.test_recipient.trim();
     }
-
-    // TG 通知测试
-    const botToken = adminSettings.telegram_bot_token;
-    const chatId = adminSettings.telegram_chat_id;
-
-    if (!botToken || !chatId) {
-      await bestEffortRecordHealthEvent(
-        database,
-        'telegram',
-        'disabled',
-        'telegram credentials are not configured',
-      );
-      return c.json({ error: '请先配置 Telegram Bot Token 和 Chat ID' }, 400);
-    }
-
-    const response = await sendTelegramMessage(botToken, {
-      chat_id: chatId,
-      text: formatTelegramHtmlText(message),
-      parse_mode: 'HTML',
+    const sent = await dispatchNotification(database, adminSettings, {
+      subject: selectedChannel === 'email' ? 'CF VPS Monitor 测试邮件' : 'CF VPS Monitor 测试消息',
+      body: message,
+    }, {
+      channel: selectedChannel,
+      auditUser: c.get('username') || 'system',
+      deps: { recordHealth: bestEffortRecordHealthEvent },
     });
-
-    const result: unknown = await response.json();
-    const telegramResult = summarizeTelegramTestResult(response, result);
-    if (telegramResult.ok) {
-      await bestEffortRecordHealthEvent(database, 'telegram', 'ok', 'Telegram test message sent');
-    } else {
-      await bestEffortRecordHealthEvent(
-        database,
-        'telegram',
-        'error',
-        `Telegram test failed: status=${telegramResult.status}; error_code=${telegramResult.error_code ?? 'unknown'}`,
-        { auditAction: 'telegram_error', auditUser: c.get('username') || 'system' },
-      );
-    }
-    if (!telegramResult.ok) {
+    if (!sent) {
       return c.json({
         success: false,
-        error: 'Telegram 测试发送失败',
-        telegram_status: telegramResult.status,
-        telegram_error_code: telegramResult.error_code,
-      }, 502);
+        error: selectedChannel === 'none' ? '通知方式为 None，未发送测试消息' : '测试消息发送失败，请检查通知配置',
+      }, selectedChannel === 'none' ? 400 : 502);
     }
     return c.json({ success: true });
   } catch (e: unknown) {
+    const component = selectedChannel === 'email' || selectedChannel === 'webhook' || selectedChannel === 'telegram'
+      ? selectedChannel
+      : 'notification';
     await bestEffortRecordHealthEvent(
       database,
-      selectedChannel === 'email' ? 'email' : 'telegram',
+      component,
       'error',
-      `${selectedChannel === 'email' ? 'SMTP' : 'Telegram'} test failed: ${errorDetail(e)}`,
-      { auditAction: selectedChannel === 'email' ? 'email_error' : 'telegram_error', auditUser: c.get('username') || 'system' },
+      `${selectedChannel} test failed: ${errorDetail(e)}`,
+      { auditAction: `${component}_error`, auditUser: c.get('username') || 'system' },
     );
     return c.json({ error: '发送测试消息失败' }, 500);
   }

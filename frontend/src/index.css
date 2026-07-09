@@ -2760,7 +2760,8 @@ html[data-monitor-theme='next'] .node-network-value strong {
 
 .notification-email-connection-grid,
 .notification-email-identity-grid,
-.notification-telegram-grid {
+.notification-telegram-grid,
+.notification-webhook-options-grid {
   min-width: 0;
   display: grid;
   align-items: start;
@@ -2785,15 +2786,58 @@ html[data-monitor-theme='next'] .node-network-value strong {
   max-width: 100%;
 }
 
+.notification-webhook-form-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(34ch, 52ch) minmax(16ch, 20ch) minmax(18ch, 22ch);
+  width: fit-content;
+  max-width: 100%;
+  gap: 8px 10px;
+  align-items: start;
+}
+
+.notification-webhook-url-row {
+  min-width: 0;
+}
+
+.notification-webhook-options-grid {
+  display: contents;
+}
+
+.notification-webhook-field {
+  min-width: 0;
+  display: block;
+}
+
+.notification-webhook-field-label {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.notification-webhook-field-description {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.notification-webhook-field .rt-SelectTrigger,
+.notification-webhook-field .rt-TextFieldRoot {
+  display: flex;
+  width: 100% !important;
+  min-height: 32px;
+}
+
 .notification-email-connection-grid > div,
 .notification-email-identity-grid > div,
-.notification-telegram-grid > div {
+.notification-telegram-grid > div,
+.notification-webhook-options-grid > div {
   min-width: 0;
 }
 
 .notification-email-connection-grid > div > div,
 .notification-email-identity-grid > div > div,
-.notification-telegram-grid > div > div {
+.notification-telegram-grid > div > div,
+.notification-webhook-url-row > div,
+.notification-webhook-options-grid > div > div {
   margin-bottom: 0 !important;
 }
 
@@ -2839,13 +2883,48 @@ html[data-monitor-theme='next'] .node-network-value strong {
   margin-top: 8px;
 }
 
+.notification-webhook-actions {
+  grid-column: 1 / -1;
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.notification-webhook-custom-grid {
+  flex: 1 0 100%;
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px 10px;
+  align-items: start;
+}
+
+.notification-webhook-custom-grid .notification-webhook-field-description {
+  min-height: 32px;
+}
+
+.notification-webhook-wide {
+  grid-column: 1 / -1;
+}
+
+.notification-webhook-field .rt-TextAreaRoot {
+  width: 100% !important;
+}
+
 .notification-email-test-input {
   width: min(38ch, 100%) !important;
   flex: 0 1 38ch;
 }
 
 .notification-email-test-button,
-.notification-telegram-test-button {
+.notification-telegram-test-button,
+.notification-webhook-test-button {
   white-space: nowrap;
 }
 
@@ -4047,14 +4126,18 @@ html[data-monitor-theme='next'] .node-network-value strong {
 @media (max-width: 900px) {
   .notification-email-connection-grid,
   .notification-email-identity-grid,
-  .notification-telegram-grid {
+  .notification-telegram-grid,
+  .notification-webhook-custom-grid,
+  .notification-webhook-options-grid {
     width: 100%;
   }
 }
 
 @media (max-width: 768px) {
   .notification-email-identity-grid,
-  .notification-telegram-grid {
+  .notification-telegram-grid,
+  .notification-webhook-custom-grid,
+  .notification-webhook-options-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -4815,7 +4898,10 @@ html[data-monitor-theme='next'] .node-network-value strong {
   .notification-channel-row,
   .notification-email-connection-grid,
   .notification-email-identity-grid,
-  .notification-telegram-grid {
+  .notification-telegram-grid,
+  .notification-webhook-custom-grid,
+  .notification-webhook-form-grid,
+  .notification-webhook-options-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -4831,7 +4917,8 @@ html[data-monitor-theme='next'] .node-network-value strong {
   }
 
   .notification-email-test-button,
-  .notification-telegram-test-button {
+  .notification-telegram-test-button,
+  .notification-webhook-test-button {
     width: 100%;
   }
 

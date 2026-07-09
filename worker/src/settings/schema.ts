@@ -1,3 +1,5 @@
+import { validateWebhookUrl } from '../utils/webhook.ts';
+
 type SettingType = 'string' | 'boolean' | 'integer' | 'enum';
 
 interface SettingDefinition {
@@ -162,7 +164,7 @@ export const SETTING_SCHEMA = {
     type: 'enum',
     defaultValue: 'telegram',
     public: false,
-    values: ['telegram', 'email', 'none'],
+    values: ['telegram', 'email', 'webhook', 'none'],
   },
   telegram_bot_token: {
     type: 'string',
@@ -234,6 +236,71 @@ export const SETTING_SCHEMA = {
     defaultValue: 'plain',
     public: false,
     values: ['plain', 'login'],
+  },
+  webhook_url: {
+    type: 'string',
+    defaultValue: '',
+    public: false,
+    sensitive: true,
+    maxLength: 2048,
+  },
+  webhook_format: {
+    type: 'enum',
+    defaultValue: 'generic',
+    public: false,
+    values: ['generic', 'slack', 'discord', 'feishu', 'dingtalk', 'wecom', 'custom'],
+  },
+  webhook_secret: {
+    type: 'string',
+    defaultValue: '',
+    public: false,
+    sensitive: true,
+    maxLength: 512,
+  },
+  webhook_method: {
+    type: 'enum',
+    defaultValue: 'POST',
+    public: false,
+    values: ['GET', 'POST'],
+  },
+  webhook_content_type: {
+    type: 'string',
+    defaultValue: 'application/json',
+    public: false,
+    maxLength: 128,
+  },
+  webhook_headers_json: {
+    type: 'string',
+    defaultValue: '',
+    public: false,
+    sensitive: true,
+    maxLength: 4000,
+  },
+  webhook_body_template: {
+    type: 'string',
+    defaultValue: '{"message":"{{message}}","title":"{{title}}"}',
+    public: false,
+    maxLength: 8000,
+  },
+  webhook_username: {
+    type: 'string',
+    defaultValue: '',
+    public: false,
+    maxLength: 256,
+  },
+  webhook_password: {
+    type: 'string',
+    defaultValue: '',
+    public: false,
+    sensitive: true,
+    maxLength: 512,
+  },
+  webhook_retry_count: {
+    type: 'integer',
+    defaultValue: '1',
+    public: false,
+    min: 1,
+    max: 3,
   },
   enable_ip_change_notification: {
     type: 'boolean',
@@ -392,6 +459,36 @@ function normalizeEmailRecipients(value: unknown): string | null {
   return [...new Set(recipients)].join(',');
 }
 
+function normalizeWebhookUrl(value: unknown): string | null {
+  if (value === '' || value === null || value === undefined) return '';
+  if (typeof value !== 'string') return null;
+  const normalized = validateWebhookUrl(value);
+  return normalized.ok ? normalized.url : null;
+}
+
+function normalizeWebhookContentType(value: unknown): string | null {
+  if (value === '' || value === null || value === undefined) return SETTING_SCHEMA.webhook_content_type.defaultValue;
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text || /[\r\n]/.test(text) || /[\x00-\x1f\x7f]/.test(text)) return null;
+  return text.includes('/') ? text : null;
+}
+
+function normalizeWebhookHeadersJson(value: unknown): string | null {
+  if (value === '' || value === null || value === undefined) return '';
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text) return '';
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    if (Object.entries(parsed).some(([key, item]) => !key || typeof item !== 'string')) return null;
+    return text;
+  } catch {
+    return null;
+  }
+}
+
 export function isKnownSettingKey(key: string): key is SettingKey {
   return SETTING_KEY_SET.has(key);
 }
@@ -426,6 +523,9 @@ export function normalizeSettingValue(
       else if (key === 'email_smtp_host') normalized = normalizeSmtpHost(value);
       else if (key === 'email_smtp_from_address') normalized = normalizeEmailAddress(value);
       else if (key === 'email_smtp_recipients') normalized = normalizeEmailRecipients(value);
+      else if (key === 'webhook_url') normalized = normalizeWebhookUrl(value);
+      else if (key === 'webhook_content_type') normalized = normalizeWebhookContentType(value);
+      else if (key === 'webhook_headers_json') normalized = normalizeWebhookHeadersJson(value);
       else if (key === 'active_theme') {
         const text = settingToString(value)?.trim() || SETTING_SCHEMA.active_theme.defaultValue;
         const activeTheme = text === 'default' ? 'monitor' : text;
