@@ -26,7 +26,7 @@ import {
 import QRCode from 'qrcode';
 import { toast } from 'sonner';
 import { useApi, useAuth } from '../../contexts/AuthContext';
-import { downloadRecoveryCodes, formatRecoveryCodesText, normalizeMfaCode } from '../../utils/mfa';
+import { downloadRecoveryCodes, formatRecoveryCodesText, normalizeMfaCode, requestMfaStepUp } from '../../utils/mfa';
 
 type AccountTab = 'username' | 'password' | 'security';
 
@@ -60,6 +60,7 @@ export default function AdminAccount() {
   const [qrDataUrl, setQrDataUrl] = useState('');
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
   const [showRebind, setShowRebind] = useState(false);
+  const [disableDialogOpen, setDisableDialogOpen] = useState(false);
 
   useEffect(() => {
     setUsername(user?.username || '');
@@ -196,7 +197,8 @@ export default function AdminAccount() {
   };
 
   const disableMfa = async () => {
-    if (!window.confirm('关闭后，登录和敏感操作将不再需要动态验证码。确定继续吗？')) return;
+    setDisableDialogOpen(false);
+    if (!await requestMfaStepUp()) return;
     setMfaLoading(true);
     try {
       await apiFetch('/admin/account/mfa/disable', { method: 'POST' });
@@ -283,7 +285,7 @@ export default function AdminAccount() {
               <Flex gap="2" wrap="wrap">
                 <Button variant="soft" onClick={() => setShowRebind((value) => !value)} disabled={mfaLoading}><QrCode size={16} />重新绑定验证器</Button>
                 <Button variant="soft" onClick={() => void regenerateRecoveryCodes()} disabled={mfaLoading}><RefreshCw size={16} />重新生成恢复码</Button>
-                <Button color="red" variant="soft" onClick={() => void disableMfa()} disabled={mfaLoading}><ShieldOff size={16} />关闭双重验证</Button>
+                <Button color="red" variant="soft" onClick={() => setDisableDialogOpen(true)} disabled={mfaLoading}><ShieldOff size={16} />关闭双重验证</Button>
               </Flex>
               {showRebind && (
                 <Box className="mfa-rebind-panel">
@@ -320,6 +322,23 @@ export default function AdminAccount() {
           )}
         </Card>
       )}
+
+      <Dialog.Root open={disableDialogOpen} onOpenChange={(open) => { if (!mfaLoading) setDisableDialogOpen(open); }}>
+        <Dialog.Content style={{ maxWidth: 440 }}>
+          <Dialog.Title>
+            <Flex align="center" gap="2"><ShieldOff size={20} />确认关闭双重身份验证</Flex>
+          </Dialog.Title>
+          <Dialog.Description size="2" color="gray">
+            关闭后，登录和敏感操作将不再需要动态验证码，现有恢复码也会立即失效。
+          </Dialog.Description>
+          <Flex justify="end" gap="2" mt="4">
+            <Button variant="soft" color="gray" disabled={mfaLoading} onClick={() => setDisableDialogOpen(false)}>取消</Button>
+            <Button color="red" disabled={mfaLoading} onClick={() => void disableMfa()}>
+              <ShieldOff size={16} />{mfaLoading ? '关闭中...' : '确认关闭'}
+            </Button>
+          </Flex>
+        </Dialog.Content>
+      </Dialog.Root>
 
       <Dialog.Root open={recoveryCodes.length > 0} onOpenChange={(open) => { if (!open) setRecoveryCodes([]); }}>
         <Dialog.Content className="mfa-recovery-dialog" style={{ maxWidth: 520 }}>
