@@ -138,7 +138,7 @@ wget -qO- 'https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/refs/heads
 4. 确认上游提交后点击 `Update branch`。
 5. 如果 GitHub 提示冲突，需要按提示创建 PR 或手动解决冲突。
 6. Fork 更新产生的 push 会触发 Cloudflare Workers Builds 自动构建部署。
-7. 更新后最好打开 `https://你的 Worker 域名/db-init` 初始化一下数据库。
+7. **更新后最好初始化一下数据库，否则可能无法使用**
 
 ### 如果是 Deploy Button 一键部署
 
