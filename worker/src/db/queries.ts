@@ -141,6 +141,35 @@ export async function getUserByUuid(database: QueryDatabase, uuid: string): Prom
   return sba.getSupabaseUserByUuid(database.env, uuid);
 }
 
+export async function enableUserTotp(
+  database: QueryDatabase,
+  uuid: string,
+  secretEnc: string,
+  recoveryCodeHashes: string[],
+  usedStep: number,
+): Promise<t.User | null> {
+  return sba.enableSupabaseUserTotp(database.env, uuid, secretEnc, recoveryCodeHashes, usedStep);
+}
+
+export async function disableUserTotp(database: QueryDatabase, uuid: string): Promise<t.User | null> {
+  return sba.disableSupabaseUserTotp(database.env, uuid);
+}
+
+export async function replaceUserRecoveryCodes(
+  database: QueryDatabase,
+  uuid: string,
+  recoveryCodeHashes: string[],
+): Promise<t.User | null> {
+  return sba.replaceSupabaseUserRecoveryCodes(database.env, uuid, recoveryCodeHashes);
+}
+
+export async function consumeTotpStep(database: QueryDatabase, uuid: string, step: number): Promise<boolean> {
+  return sba.consumeSupabaseTotpStep(database.env, uuid, step);
+}
+
+export async function consumeRecoveryCode(database: QueryDatabase, uuid: string, codeHash: string): Promise<boolean> {
+  return sba.consumeSupabaseRecoveryCode(database.env, uuid, codeHash);
+}
 export async function updateUserUsername(database: QueryDatabase, uuid: string, username: string): Promise<void> {
   return sba.updateSupabaseUserUsername(database.env, uuid, username);
 }

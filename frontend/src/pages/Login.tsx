@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Flex, Card, Text, TextField, Button, Heading, Box, Separator } from '@radix-ui/themes';
-import { LogIn, Eye, EyeOff, KeyRound, UserPlus } from 'lucide-react';
+import { Flex, Card, Text, TextField, Button, Heading, Box, Separator, SegmentedControl } from '@radix-ui/themes';
+import { ArrowLeft, LogIn, Eye, EyeOff, KeyRound, ShieldCheck, UserPlus } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { hasLocalDisplayThemePreference, useDisplayTheme } from '../contexts/DisplayThemeContext';
 import { toast } from 'sonner';
@@ -10,6 +10,7 @@ import { refreshActiveThemeStylesheet } from '../utils/activeThemeStylesheet';
 import { normalizeDisplayTheme } from '../utils/displayTheme';
 import { fetchPublicSettings } from '../utils/publicSettings';
 import { formatAppVersion } from '../utils/version';
+import { normalizeMfaCode, type MfaMethod } from '../utils/mfa';
 
 type RecoveryStatus = {
   admin_present: boolean;
@@ -30,7 +31,7 @@ function safeLogoUrl(value: unknown) {
 }
 
 export default function Login() {
-  const { login, isAuthenticated, authLoading } = useAuth();
+  const { login, completeMfaLogin, isAuthenticated, authLoading } = useAuth();
   const { setDisplayThemeFromSettings } = useDisplayTheme();
   const navigate = useNavigate();
   const location = useLocation();
@@ -40,6 +41,9 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [mfaChallenge, setMfaChallenge] = useState('');
+  const [mfaMethod, setMfaMethod] = useState<MfaMethod>('totp');
+  const [mfaCode, setMfaCode] = useState('');
   const [version, setVersion] = useState('dev');
   const [siteLogoUrl, setSiteLogoUrl] = useState('');
   const [recoveryStatus, setRecoveryStatus] = useState<RecoveryStatus | null>(null);
@@ -96,15 +100,49 @@ export default function Login() {
     }
 
     setLoading(true);
-    const error = await login(username, password);
+    const result = await login(username, password);
     setLoading(false);
 
-    if (error) {
-      toast.error(error);
-    } else {
-      toast.success('登录成功');
-      navigate(redirectTo, { replace: true });
+    if (result.kind === 'error') {
+      toast.error(result.error);
+      return;
     }
+    if (result.kind === 'mfa_required') {
+      setMfaChallenge(result.challenge);
+      setMfaMethod(result.methods.includes('totp') ? 'totp' : result.methods[0] || 'totp');
+      setMfaCode('');
+      setPassword('');
+      return;
+    }
+    toast.success('登录成功');
+    navigate(redirectTo, { replace: true });
+  };
+
+  const handleMfaSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const code = normalizeMfaCode(mfaCode, mfaMethod);
+    if (!code) {
+      toast.error(mfaMethod === 'totp' ? '请输入 6 位动态验证码' : '恢复码格式无效');
+      return;
+    }
+
+    setLoading(true);
+    const result = await completeMfaLogin(mfaChallenge, mfaMethod, code);
+    setLoading(false);
+    if (result.kind === 'error') {
+      toast.error(result.error);
+      if (/失效|重新登录/.test(result.error)) {
+        setMfaChallenge('');
+        setMfaCode('');
+      }
+      return;
+    }
+    if (result.kind !== 'success') {
+      toast.error('登录验证响应无效');
+      return;
+    }
+    toast.success('登录成功');
+    navigate(redirectTo, { replace: true });
   };
 
   const handleRecoverySubmit = async (e: React.FormEvent) => {
@@ -166,7 +204,7 @@ export default function Login() {
 
         <Separator size="4" mb="4" />
 
-        {!recoveryMode && (
+        {!recoveryMode && !mfaChallenge && (
         <form onSubmit={handleSubmit}>
           <Flex direction="column" gap="4">
             <label htmlFor="login-username">
@@ -234,6 +272,56 @@ export default function Login() {
         </form>
         )}
 
+        {!recoveryMode && mfaChallenge && (
+          <form onSubmit={handleMfaSubmit}>
+            <Flex direction="column" gap="4">
+              <Flex align="center" gap="2">
+                <ShieldCheck size={18} />
+                <Text size="3" weight="bold">双重身份验证</Text>
+              </Flex>
+              <Text size="2" color="gray">请输入验证器生成的动态验证码，或使用一个恢复码。</Text>
+              <SegmentedControl.Root
+                value={mfaMethod}
+                onValueChange={(value) => {
+                  setMfaMethod(value as MfaMethod);
+                  setMfaCode('');
+                }}
+              >
+                <SegmentedControl.Item value="totp">动态验证码</SegmentedControl.Item>
+                <SegmentedControl.Item value="recovery_code">恢复码</SegmentedControl.Item>
+              </SegmentedControl.Root>
+              <label htmlFor="login-mfa-code">
+                <Text size="2" weight="bold" style={{ marginBottom: 6, display: 'inline-block' }}>
+                  {mfaMethod === 'totp' ? '6 位验证码' : '一次性恢复码'}
+                </Text>
+                <TextField.Root
+                  id="login-mfa-code"
+                  size="3"
+                  value={mfaCode}
+                  onChange={(event) => setMfaCode(event.target.value)}
+                  placeholder={mfaMethod === 'totp' ? '000000' : 'XXXX-XXXX-XXXX-XXXX-XXXX-XXXX'}
+                  autoComplete="one-time-code"
+                  inputMode={mfaMethod === 'totp' ? 'numeric' : 'text'}
+                  autoFocus
+                  style={{ width: '100%' }}
+                />
+              </label>
+              <Button type="submit" size="3" disabled={loading} style={{ height: 44 }}>
+                <KeyRound size={18} />{loading ? '验证中...' : '验证并登录'}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => {
+                  setMfaChallenge('');
+                  setMfaCode('');
+                }}
+              >
+                <ArrowLeft size={16} />返回密码登录
+              </Button>
+            </Flex>
+          </form>
+        )}
         {recoveryMode && (
           <form onSubmit={handleRecoverySubmit}>
             <Flex direction="column" gap="4">
@@ -324,7 +412,11 @@ export default function Login() {
             type="button"
             variant="ghost"
             size="2"
-            onClick={() => setRecoveryMode(!recoveryMode)}
+            onClick={() => {
+              setRecoveryMode(!recoveryMode);
+              setMfaChallenge('');
+              setMfaCode('');
+            }}
           >
             {recoveryMode ? '返回登录' : '忘记密码'}
           </Button>

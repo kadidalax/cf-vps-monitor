@@ -3,8 +3,10 @@ import type { Context } from 'hono';
 
 const ADMIN_SESSION_COOKIE = 'cf_monitor_session';
 const ADMIN_CSRF_COOKIE = 'cf_monitor_csrf';
+const MFA_STEP_UP_COOKIE = 'cf_monitor_mfa_stepup';
 const ADMIN_SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
 const ADMIN_CSRF_MAX_AGE_SECONDS = ADMIN_SESSION_MAX_AGE_SECONDS;
+const MFA_STEP_UP_MAX_AGE_SECONDS = 5 * 60;
 
 function isHttpsRequest(c: Context): boolean {
   return new URL(c.req.url).protocol === 'https:';
@@ -70,7 +72,27 @@ export function verifyAdminCsrfToken(c: Context): boolean {
   return Boolean(cookieToken && isValidCsrfToken(headerToken) && constantTimeStringEqual(cookieToken, headerToken));
 }
 
+export function getMfaStepUpToken(c: Context): string | null {
+  return getCookie(c, MFA_STEP_UP_COOKIE) ?? null;
+}
+
+export function setMfaStepUpCookie(c: Context, token: string): void {
+  setCookie(c, MFA_STEP_UP_COOKIE, token, {
+    path: '/api/admin',
+    httpOnly: true,
+    secure: isHttpsRequest(c),
+    sameSite: 'Strict',
+    maxAge: MFA_STEP_UP_MAX_AGE_SECONDS,
+  });
+}
+
+export function clearMfaStepUpCookie(c: Context): void {
+  deleteCookie(c, MFA_STEP_UP_COOKIE, {
+    path: '/api/admin',
+  });
+}
 export function clearAdminSessionCookie(c: Context): void {
+  clearMfaStepUpCookie(c);
   deleteCookie(c, ADMIN_SESSION_COOKIE, {
     path: '/',
   });

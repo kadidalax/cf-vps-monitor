@@ -10,6 +10,9 @@ import { getDatabase } from '../db/provider';
 import { resolveSupabaseApiKey } from '../db/supabase-api/client';
 import { invalidateAdminSessionCache, validateAdminSession } from '../auth/admin-session';
 import { AuthConfigurationError, generateToken, verifyAdminToken } from '../auth/jwt';
+import { decryptTotpSecret, hashRecoveryCode } from '../auth/mfa';
+import { generateMfaToken, verifyMfaToken } from '../auth/mfa-token';
+import { verifyTotpCode } from '../auth/totp';
 import { hashPassword, needsPasswordRehash, validateAdminPasswordStrength, verifyPassword } from '../auth/password';
 import {
   clearAdminSessionCookie,
@@ -40,6 +43,8 @@ const LOGIN_FAILURE_AUDIT_THROTTLE_MS = 60 * 1000;
 const LOGIN_FAILURE_AUDIT_THROTTLE_MAX_ENTRIES = 512;
 const MAX_LOGIN_USERNAME_LENGTH = 128;
 const MAX_LOGIN_PASSWORD_LENGTH = 4096;
+const MAX_MFA_CHALLENGE_LENGTH = 4096;
+const MAX_MFA_CODE_LENGTH = 128;
 const MAX_PUBLIC_JSON_BYTES = 8 * 1024;
 const MAX_PUBLIC_RECORD_RANGE_MS = 3 * 24 * 60 * 60 * 1000;
 const PUBLIC_RECORD_RANGE_SLOP_MS = 60 * 1000;
@@ -872,7 +877,7 @@ export async function recordLoginFailure(
   await db.setLoginRateLimits(database, nextStates);
 }
 
-async function clearLoginFailures(database: db.QueryDatabase, buckets: string[]): Promise<void> {
+export async function clearLoginFailures(database: db.QueryDatabase, buckets: string[]): Promise<void> {
   await db.clearLoginRateLimits(database, buckets);
 }
 
@@ -887,6 +892,49 @@ function runLoginBackground(c: PublicContext, task: Promise<unknown>): void {
   void guarded;
 }
 
+async function completeAdminLogin(
+  c: PublicContext,
+  database: db.QueryDatabase,
+  user: db.User,
+  bucketsToClear: string[],
+  metrics: TimingMetric[],
+) {
+  let token: string;
+  try {
+    token = await timed(metrics, 'sign_token', () =>
+      generateToken(user.uuid, user.username, user.session_version, c.env));
+  } catch (error) {
+    if (error instanceof AuthConfigurationError) {
+      console.error('[auth] JWT_SECRET is missing or shorter than 32 bytes');
+      return c.json({ error: '服务端 JWT_SECRET 未正确配置' }, 500);
+    }
+    throw error;
+  }
+
+  setAdminSessionCookie(c, token);
+  const csrfToken = ensureAdminCsrfCookie(c);
+  putAdminSessionEdgeCache(c, user);
+  if (bucketsToClear.length > 0) {
+    runLoginBackground(c, clearLoginFailures(database, bucketsToClear));
+  }
+  runLoginBackground(c, db.insertAuditLog(database, user.username, 'login', '用户登录'));
+
+  setServerTiming(c, metrics);
+  return c.json({
+    csrf_token: csrfToken,
+    user: {
+      uuid: user.uuid,
+      username: user.username,
+    },
+  });
+}
+
+export function mfaRateLimitBuckets(ip: string, userId: string): string[] {
+  return [
+    `mfa:ip:${ip}`,
+    `mfa:ip-user:${ip}:${userId}`,
+  ];
+}
 export async function cleanupExpiredLoginRateLimits(database: db.QueryDatabase, nowMs: number): Promise<boolean> {
   if (
     lastLoginRateLimitCleanupAt > 0 &&
@@ -1075,17 +1123,6 @@ publicRoutes.post('/login', async (c) => {
     return c.json({ error: '用户名或密码错误' }, 401);
   }
 
-  let token: string;
-  try {
-    token = await timed(metrics, 'sign_token', () => generateToken(user.uuid, user.username, user.session_version, c.env));
-  } catch (error) {
-    if (error instanceof AuthConfigurationError) {
-      console.error('[auth] JWT_SECRET is missing or shorter than 32 bytes');
-      return c.json({ error: '服务端 JWT_SECRET 未正确配置' }, 500);
-    }
-    throw error;
-  }
-
   if (needsPasswordRehash(user.passwd)) {
     runLoginBackground(
       c,
@@ -1093,24 +1130,134 @@ publicRoutes.post('/login', async (c) => {
     );
   }
 
-  setAdminSessionCookie(c, token);
-  const csrfToken = ensureAdminCsrfCookie(c);
-  putAdminSessionEdgeCache(c, user);
-  if ([...rateLimitStates.values()].some(Boolean)) {
-    runLoginBackground(c, clearLoginFailures(database, rateLimitBuckets));
+  if (user.totp_enabled_at && user.totp_secret_enc) {
+    try {
+      const challenge = await timed(metrics, 'sign_mfa_challenge', () => generateMfaToken({
+        userId: user.uuid,
+        username: user.username,
+        sessionVersion: user.session_version,
+        purpose: 'mfa-login',
+      }, c.env));
+      setServerTiming(c, metrics);
+      return c.json({
+        code: 'MFA_REQUIRED',
+        mfa_required: true,
+        challenge,
+        methods: ['totp', 'recovery_code'],
+      });
+    } catch (error) {
+      if (error instanceof AuthConfigurationError) {
+        console.error('[auth] JWT_SECRET is missing or shorter than 32 bytes');
+        return c.json({ error: '服务端 JWT_SECRET 未正确配置' }, 500);
+      }
+      throw error;
+    }
   }
-  runLoginBackground(c, db.insertAuditLog(database, user.username, 'login', '用户登录'));
 
-  setServerTiming(c, metrics);
-  return c.json({
-    csrf_token: csrfToken,
-    user: {
-      uuid: user.uuid,
-      username: user.username,
-    },
-  });
+  return completeAdminLogin(
+    c,
+    database,
+    user,
+    [...rateLimitStates.values()].some(Boolean) ? rateLimitBuckets : [],
+    metrics,
+  );
 });
 
+publicRoutes.post('/login/mfa', async (c) => {
+  const metrics: TimingMetric[] = [];
+  const parsed = await timed(metrics, 'parse_body', () => readPublicJsonObject(c));
+  if ('response' in parsed) return parsed.response;
+
+  const challenge = typeof parsed.body.challenge === 'string' ? parsed.body.challenge : '';
+  const method = parsed.body.method;
+  const code = typeof parsed.body.code === 'string' ? parsed.body.code.trim() : '';
+  if (
+    !challenge ||
+    challenge.length > MAX_MFA_CHALLENGE_LENGTH ||
+    (method !== 'totp' && method !== 'recovery_code') ||
+    !code ||
+    code.length > MAX_MFA_CODE_LENGTH
+  ) {
+    return c.json({ code: 'MFA_INPUT_INVALID', error: '双重身份验证参数无效' }, 400);
+  }
+
+  let payload;
+  try {
+    payload = await timed(metrics, 'verify_mfa_challenge', () => verifyMfaToken(challenge, 'mfa-login', c.env));
+  } catch (error) {
+    if (error instanceof AuthConfigurationError) {
+      console.error('[auth] JWT_SECRET is missing or shorter than 32 bytes');
+      return c.json({ error: '服务端 JWT_SECRET 未正确配置' }, 500);
+    }
+    throw error;
+  }
+  if (!payload) {
+    return c.json({ code: 'MFA_CHALLENGE_INVALID', error: '登录验证已失效，请重新登录' }, 401);
+  }
+
+  const database = getDatabase(c.env);
+  const user = await timed(metrics, 'db_user', () => db.getUserByUuid(database, payload.userId));
+  if (
+    !user ||
+    user.username !== payload.username ||
+    user.session_version !== payload.sessionVersion ||
+    !user.totp_enabled_at ||
+    !user.totp_secret_enc
+  ) {
+    return c.json({ code: 'MFA_CHALLENGE_INVALID', error: '登录验证已失效，请重新登录' }, 401);
+  }
+
+  const clientIp = getClientIp(c);
+  const mfaBuckets = mfaRateLimitBuckets(clientIp, user.uuid);
+  const nowMs = Date.now();
+  const rateLimitStates = await timed(metrics, 'db_rate_limit', () => loadLoginRateLimitStates(database, mfaBuckets));
+  const retryAfter = getLoginRetryAfterSeconds(rateLimitStates, nowMs);
+  if (retryAfter > 0) {
+    c.header('Retry-After', String(retryAfter));
+    await timed(metrics, 'audit_failure', () => auditLoginFailure(database, user.username, clientIp, 'mfa_rate_limited', nowMs));
+    return c.json({ code: 'MFA_RATE_LIMITED', error: `验证尝试过于频繁，请 ${retryAfter} 秒后再试` }, 429);
+  }
+
+  let verified = false;
+  if (method === 'totp') {
+    try {
+      const secret = await timed(metrics, 'decrypt_totp', () => decryptTotpSecret(user.totp_secret_enc!, user.uuid, c.env));
+      const result = await timed(metrics, 'verify_totp', () => verifyTotpCode(secret, code));
+      if (result.valid && result.step !== undefined) {
+        verified = await timed(metrics, 'consume_totp_step', () => db.consumeTotpStep(database, user.uuid, result.step!));
+      }
+    } catch (error) {
+      if (error instanceof AuthConfigurationError) {
+        console.error('[auth] JWT_SECRET is missing or shorter than 32 bytes');
+        return c.json({ error: '服务端 JWT_SECRET 未正确配置' }, 500);
+      }
+      console.error('[auth] failed to decrypt TOTP secret:', sanitizeSetupDiagnosticDetail(error));
+      return c.json({ error: '双重身份验证配置损坏，请使用管理员恢复功能' }, 500);
+    }
+  } else {
+    try {
+      const codeHash = await timed(metrics, 'hash_recovery_code', () => hashRecoveryCode(code, c.env));
+      verified = await timed(metrics, 'consume_recovery_code', () => db.consumeRecoveryCode(database, user.uuid, codeHash));
+    } catch (error) {
+      if (error instanceof AuthConfigurationError) {
+        console.error('[auth] JWT_SECRET is missing or shorter than 32 bytes');
+        return c.json({ error: '服务端 JWT_SECRET 未正确配置' }, 500);
+      }
+      verified = false;
+    }
+  }
+
+  if (!verified) {
+    const failedAt = Date.now();
+    await timed(metrics, 'db_record_failure', () => recordLoginFailure(database, mfaBuckets, failedAt, rateLimitStates));
+    await timed(metrics, 'audit_failure', () => auditLoginFailure(database, user.username, clientIp, 'invalid_mfa', failedAt));
+    setServerTiming(c, metrics);
+    return c.json({ code: 'MFA_INVALID', error: '验证码或恢复码无效' }, 401);
+  }
+
+  const loginBuckets = loginRateLimitBuckets(clientIp, user.username);
+  return completeAdminLogin(c, database, user, [...loginBuckets, ...mfaBuckets], metrics);
+});
 // 退出登录
 publicRoutes.post('/logout', async (c) => {
   const token = getAdminSessionToken(c);

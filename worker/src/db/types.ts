@@ -141,6 +141,10 @@ export interface User {
   passwd: string;
   session_version: number;
   password_changed_at: string | null;
+  totp_secret_enc: string | null;
+  totp_enabled_at: string | null;
+  totp_last_used_step: number;
+  recovery_code_hashes: string[];
   created_at: string;
   updated_at: string;
 }

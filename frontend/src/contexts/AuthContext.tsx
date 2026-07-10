@@ -1,11 +1,19 @@
 import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import { getSessionStorageItem, removeSessionStorageItem, setSessionStorageItem } from '../utils/browserStorage';
 import { API_BASE, CSRF_COOKIE_NAME, buildApiRequest, readCookie } from '../utils/api';
+import {
+  parseLoginResponse,
+  requestMfaStepUp,
+  runWithMfaStepUpRetry,
+  type LoginResult,
+  type MfaMethod,
+} from '../utils/mfa';
 import { normalizeAuthUser, shouldCheckAdminSessionOnLoad, shouldClearAuthForStatus, type User } from './auth-state';
 
 interface AuthContextType {
   user: User | null;
-  login: (username: string, password: string) => Promise<string | null>;
+  login: (username: string, password: string) => Promise<LoginResult>;
+  completeMfaLogin: (challenge: string, method: MfaMethod, code: string) => Promise<LoginResult>;
   logout: () => void;
   updateUser: (nextUser: Partial<User>) => void;
   isAuthenticated: boolean;
@@ -14,7 +22,8 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType>({
   user: null,
-  login: async () => null,
+  login: async () => ({ kind: 'error', error: '登录不可用' }),
+  completeMfaLogin: async () => ({ kind: 'error', error: '登录不可用' }),
   logout: () => {},
   updateUser: () => {},
   isAuthenticated: false,
@@ -97,7 +106,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [clearAuth]);
 
-  const login = useCallback(async (username: string, password: string): Promise<string | null> => {
+  const finishLogin = useCallback((result: LoginResult): LoginResult => {
+    if (result.kind !== 'success') return result;
+    const nextUser = normalizeAuthUser(result.user);
+    if (!nextUser) return { kind: 'error', error: '登录响应无效' };
+    writeStoredUser(nextUser);
+    setUser(nextUser);
+    return { kind: 'success', user: nextUser };
+  }, []);
+
+  const login = useCallback(async (username: string, password: string): Promise<LoginResult> => {
     try {
       const res = await fetch(`${API_BASE}/login`, {
         method: 'POST',
@@ -105,19 +123,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         credentials: 'same-origin',
         body: JSON.stringify({ username, password }),
       });
-      const data = await readJson(res);
-      const nextUser = normalizeAuthUser(data.user);
-
-      if (res.ok && nextUser) {
-        writeStoredUser(nextUser);
-        setUser(nextUser);
-        return null;
-      }
-      return data.error || 'Login failed';
+      return finishLogin(parseLoginResponse(res.status, await readJson(res)));
     } catch {
-      return 'Network error';
+      return { kind: 'error', error: '网络错误' };
     }
-  }, []);
+  }, [finishLogin]);
+
+  const completeMfaLogin = useCallback(async (
+    challenge: string,
+    method: MfaMethod,
+    code: string,
+  ): Promise<LoginResult> => {
+    try {
+      const res = await fetch(`${API_BASE}/login/mfa`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ challenge, method, code }),
+      });
+      return finishLogin(parseLoginResponse(res.status, await readJson(res)));
+    } catch {
+      return { kind: 'error', error: '网络错误' };
+    }
+  }, [finishLogin]);
 
   const logout = useCallback(() => {
     clearAuth();
@@ -143,7 +171,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, login, logout, updateUser, isAuthenticated: !!user, authLoading }}>
+    <AuthContext.Provider value={{
+      user,
+      login,
+      completeMfaLogin,
+      logout,
+      updateUser,
+      isAuthenticated: !!user,
+      authLoading,
+    }}>
       {children}
     </AuthContext.Provider>
   );
@@ -157,8 +193,13 @@ export function useApi() {
   const { logout } = useAuth();
 
   const apiFetch = useCallback(async (path: string, options: RequestInit = {}) => {
-    const { url, init } = buildApiRequest(path, options);
-    const res = await fetch(url, init);
+    const res = await runWithMfaStepUpRetry(
+      async () => {
+        const { url, init } = buildApiRequest(path, options);
+        return fetch(url, init);
+      },
+      requestMfaStepUp,
+    );
     const data = await readJson(res);
 
     if (!res.ok) {

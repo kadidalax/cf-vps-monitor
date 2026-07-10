@@ -19,7 +19,9 @@ import * as db from './db/queries';
 import { DatabaseConfigurationError, getDatabase, withDatabase } from './db/provider';
 import { validateAdminSession } from './auth/admin-session';
 import { AuthConfigurationError, verifyAdminToken, type AdminJwtPayload } from './auth/jwt';
-import { getAdminSessionToken, verifyAdminCsrfToken } from './auth/session';
+import { isMfaStepUpProtectedRequest } from './auth/mfa-policy';
+import { verifyMfaToken } from './auth/mfa-token';
+import { getAdminSessionToken, getMfaStepUpToken, verifyAdminCsrfToken } from './auth/session';
 import { buildAdminSettings } from './settings/schema';
 import { bestEffortRecordHealthEvent, errorDetail } from './utils/observability';
 import { NOTIFICATION_DISPATCH_SETTING_KEYS, dispatchNotification } from './utils/notification-dispatch';
@@ -148,6 +150,7 @@ function canServeWithoutDatabaseStartup(pathname: string): boolean {
     pathname === '/agent/install-linux.sh' ||
     pathname === '/agent/install-windows.ps1' ||
     pathname === '/api/login' ||
+    pathname === '/api/login/mfa' ||
     pathname === '/api/logout' ||
     pathname === '/api/me' ||
     pathname === '/api/clients' ||
@@ -251,6 +254,43 @@ export async function auditCsrfRejection(
   return true;
 }
 
+async function requireMfaStepUp(
+  c: AppContext,
+  database: db.QueryDatabase,
+  payload: AdminJwtPayload,
+): Promise<Response | null> {
+  const pathname = new URL(c.req.url).pathname;
+  if (!isMfaStepUpProtectedRequest(c.req.method, pathname)) return null;
+
+  const user = await db.getUserByUuid(database, payload.userId);
+  if (!user || user.username !== payload.username || user.session_version !== payload.sessionVersion) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+  if (!user.totp_enabled_at || !user.totp_secret_enc) return null;
+
+  const token = getMfaStepUpToken(c);
+  let stepUp = null;
+  try {
+    stepUp = token ? await verifyMfaToken(token, 'mfa-step-up', c.env) : null;
+  } catch (error) {
+    if (error instanceof AuthConfigurationError) {
+      return c.json({ error: 'Server authentication is not configured' }, 500);
+    }
+    throw error;
+  }
+  if (
+    !stepUp ||
+    stepUp.userId !== user.uuid ||
+    stepUp.username !== user.username ||
+    stepUp.sessionVersion !== user.session_version
+  ) {
+    return c.json({
+      code: 'MFA_STEP_UP_REQUIRED',
+      error: '需要双重身份验证确认',
+    }, 428);
+  }
+  return null;
+}
 app.use('*', async (c, next) => {
   await next();
   if (c.res.status === 101) return;
@@ -311,7 +351,9 @@ app.use('/api/admin/*', async (c, next): Promise<Response | undefined> => {
       return c.json({ error: 'CSRF token 无效，请刷新页面后重试' }, 403);
     }
     if (!safeMethod) {
-      return withDatabase(c.env, async () => {
+      return withDatabase(c.env, async (database) => {
+        const stepUpResponse = await requireMfaStepUp(c, database, payload);
+        if (stepUpResponse) return stepUpResponse;
         await next();
         return undefined;
       });
@@ -337,6 +379,10 @@ app.use('/api/admin/*', async (c, next): Promise<Response | undefined> => {
         // Keep CSRF rejection independent from audit logging availability.
       }
       return c.json({ error: 'CSRF token 无效，请刷新页面后重试' }, 403);
+    }
+    if (!safeMethod) {
+      const stepUpResponse = await requireMfaStepUp(c, database, payload);
+      if (stepUpResponse) return stepUpResponse;
     }
     await next();
     return undefined;

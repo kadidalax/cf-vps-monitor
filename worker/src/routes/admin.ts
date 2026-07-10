@@ -7,9 +7,12 @@ import type { Context } from 'hono';
 import type { Bindings, Variables } from '../index';
 import * as db from '../db/queries';
 import { AuthConfigurationError, generateToken } from '../auth/jwt';
+import { decryptTotpSecret, encryptTotpSecret, generateRecoveryCodes, hashRecoveryCode } from '../auth/mfa';
+import { generateMfaSetupToken, generateMfaToken, verifyMfaSetupToken } from '../auth/mfa-token';
+import { buildTotpUri, generateTotpSecret, verifyTotpCode } from '../auth/totp';
 import { invalidateAdminSessionCache } from '../auth/admin-session';
 import { hashPassword, validateAdminPasswordStrength, verifyPassword } from '../auth/password';
-import { setAdminSessionCookie } from '../auth/session';
+import { clearMfaStepUpCookie, setAdminSessionCookie, setMfaStepUpCookie } from '../auth/session';
 import { SETTING_SCHEMA, buildAdminSettings, sanitizeSettingsForStorage } from '../settings/schema';
 import {
   BACKUP_ENCRYPTION_ALGORITHM,
@@ -43,7 +46,17 @@ import {
   shortGitSha,
   type UpdateCheckResult,
 } from '../utils/update-check';
-import { deleteAdminSessionEdgeCache, invalidatePublicMetadataCache, purgePublicMetadataEdgeCache } from './public';
+import {
+  auditLoginFailure,
+  clearLoginFailures,
+  deleteAdminSessionEdgeCache,
+  getLoginRetryAfterSeconds,
+  invalidatePublicMetadataCache,
+  loadLoginRateLimitStates,
+  mfaRateLimitBuckets,
+  purgePublicMetadataEdgeCache,
+  recordLoginFailure,
+} from './public';
 import { invalidateAgentClientAuthCache, invalidateAgentPingTaskCache } from './client';
 import { invalidateLiveViewerSettingsCache } from './websocket';
 import { getDatabase, type AppDatabase } from '../db/provider';
@@ -679,7 +692,8 @@ function hasNonEmptyStringList(value: unknown): boolean {
   if (typeof value === 'string') {
     try {
       source = JSON.parse(value);
-    } catch {
+    } catch (error) {
+      if (error instanceof AuthConfigurationError) throw error;
       return false;
     }
   }
@@ -2460,6 +2474,227 @@ adminRoutes.post('/notification/load/:id', async (c) => {
 
 // ============ 账户管理 ============
 
+type MfaMethod = 'totp' | 'recovery_code';
+
+function readMfaMethod(value: unknown): MfaMethod | null {
+  return value === 'totp' || value === 'recovery_code' ? value : null;
+}
+
+async function verifyUserMfaFactor(
+  database: db.QueryDatabase,
+  user: db.User,
+  method: MfaMethod,
+  code: string,
+  env: Bindings,
+): Promise<boolean> {
+  if (!user.totp_enabled_at || !user.totp_secret_enc) return false;
+  if (method === 'recovery_code') {
+    try {
+      return db.consumeRecoveryCode(database, user.uuid, await hashRecoveryCode(code, env));
+    } catch (error) {
+      if (error instanceof AuthConfigurationError) throw error;
+      return false;
+    }
+  }
+
+  const secret = await decryptTotpSecret(user.totp_secret_enc, user.uuid, env);
+  const result = await verifyTotpCode(secret, code);
+  return Boolean(result.valid && result.step !== undefined &&
+    await db.consumeTotpStep(database, user.uuid, result.step));
+}
+
+async function replaceRotatedAdminSession(c: AdminContext, previousSessionVersion: number, user: db.User): Promise<void> {
+  await deleteAdminSessionEdgeCache(c, user.uuid, previousSessionVersion);
+  invalidateAdminSessionCache(user.uuid);
+  const token = await generateToken(user.uuid, user.username, user.session_version, c.env);
+  setAdminSessionCookie(c, token);
+  clearMfaStepUpCookie(c);
+}
+
+adminRoutes.get('/account/mfa', async (c) => {
+  const user = await db.getUserByUuid(getDatabase(c.env), c.get('userId')!);
+  if (!user) return c.json({ error: '用户不存在' }, 404);
+  return c.json({
+    enabled: Boolean(user.totp_enabled_at && user.totp_secret_enc),
+    enabled_at: user.totp_enabled_at,
+    recovery_codes_remaining: Array.isArray(user.recovery_code_hashes) ? user.recovery_code_hashes.length : 0,
+  });
+});
+
+adminRoutes.post('/account/mfa/setup', async (c) => {
+  const parsed = await readAdminJsonObject(c);
+  if (!parsed.ok) return parsed.response;
+  const password = typeof parsed.body.password === 'string' ? parsed.body.password : '';
+  if (!password || password.length > 4096) return c.json({ error: '当前密码无效' }, 400);
+
+  const database = getDatabase(c.env);
+  const user = await db.getUserByUuid(database, c.get('userId')!);
+  if (!user) return c.json({ error: '用户不存在' }, 404);
+  const clientIp = getCloudflareClientIp(c);
+  const buckets = mfaRateLimitBuckets(clientIp, user.uuid);
+  const nowMs = Date.now();
+  const states = await loadLoginRateLimitStates(database, buckets);
+  const retryAfter = getLoginRetryAfterSeconds(states, nowMs);
+  if (retryAfter > 0) {
+    c.header('Retry-After', String(retryAfter));
+    return c.json({ code: 'MFA_RATE_LIMITED', error: `验证尝试过于频繁，请 ${retryAfter} 秒后再试` }, 429);
+  }
+  if (!await verifyPassword(password, user.passwd)) {
+    const failedAt = Date.now();
+    await recordLoginFailure(database, buckets, failedAt, states);
+    await auditLoginFailure(database, user.username, clientIp, 'invalid_mfa_setup_password', failedAt);
+    return c.json({ error: '当前密码错误' }, 401);
+  }
+  await clearLoginFailures(database, buckets);
+
+  const secret = generateTotpSecret();
+  const encryptedSecret = await encryptTotpSecret(secret, user.uuid, c.env);
+  const setupToken = await generateMfaSetupToken({
+    userId: user.uuid,
+    username: user.username,
+    sessionVersion: user.session_version,
+    encryptedSecret,
+  }, c.env);
+  return c.json({
+    setup_token: setupToken,
+    secret,
+    uri: buildTotpUri({ secret, username: user.username }),
+  });
+});
+
+adminRoutes.post('/account/mfa/enable', async (c) => {
+  const parsed = await readAdminJsonObject(c);
+  if (!parsed.ok) return parsed.response;
+  const setupToken = typeof parsed.body.setup_token === 'string' ? parsed.body.setup_token : '';
+  const code = typeof parsed.body.code === 'string' ? parsed.body.code.trim() : '';
+  if (!setupToken || setupToken.length > 4096 || !/^\d{6}$/.test(code)) {
+    return c.json({ error: '绑定参数无效' }, 400);
+  }
+
+  const userId = c.get('userId')!;
+  const database = getDatabase(c.env);
+  const user = await db.getUserByUuid(database, userId);
+  if (!user) return c.json({ error: '用户不存在' }, 404);
+  const setup = await verifyMfaSetupToken(setupToken, c.env);
+  if (!setup || setup.userId !== user.uuid || setup.username !== user.username || setup.sessionVersion !== user.session_version) {
+    return c.json({ error: '绑定信息已失效，请重新开始' }, 401);
+  }
+
+  const clientIp = getCloudflareClientIp(c);
+  const buckets = mfaRateLimitBuckets(clientIp, user.uuid);
+  const nowMs = Date.now();
+  const states = await loadLoginRateLimitStates(database, buckets);
+  const retryAfter = getLoginRetryAfterSeconds(states, nowMs);
+  if (retryAfter > 0) {
+    c.header('Retry-After', String(retryAfter));
+    return c.json({ code: 'MFA_RATE_LIMITED', error: `验证尝试过于频繁，请 ${retryAfter} 秒后再试` }, 429);
+  }
+
+  const secret = await decryptTotpSecret(setup.encryptedSecret, user.uuid, c.env);
+  const result = await verifyTotpCode(secret, code);
+  if (!result.valid || result.step === undefined) {
+    const failedAt = Date.now();
+    await recordLoginFailure(database, buckets, failedAt, states);
+    await auditLoginFailure(database, user.username, clientIp, 'invalid_mfa_enrollment_code', failedAt);
+    return c.json({ error: '验证码无效，请确认服务器时间准确' }, 401);
+  }
+  await clearLoginFailures(database, buckets);
+
+  const recovery = await generateRecoveryCodes(c.env);
+  const updated = await db.enableUserTotp(
+    database,
+    user.uuid,
+    setup.encryptedSecret,
+    recovery.hashes,
+    result.step,
+  );
+  if (!updated) return c.json({ error: '用户不存在' }, 404);
+  await replaceRotatedAdminSession(c, user.session_version, updated);
+  await db.insertAuditLog(database, user.username, 'mfa_enabled', '启用 TOTP 双重身份验证', 'warning');
+  return c.json({ success: true, recovery_codes: recovery.codes });
+});
+
+adminRoutes.post('/account/mfa/recovery-codes', async (c) => {
+  const database = getDatabase(c.env);
+  const user = await db.getUserByUuid(database, c.get('userId')!);
+  if (!user) return c.json({ error: '用户不存在' }, 404);
+  if (!user.totp_enabled_at) return c.json({ error: '尚未启用双重身份验证' }, 409);
+
+  const recovery = await generateRecoveryCodes(c.env);
+  const updated = await db.replaceUserRecoveryCodes(database, user.uuid, recovery.hashes);
+  if (!updated) return c.json({ error: '无法更新恢复码' }, 409);
+  await replaceRotatedAdminSession(c, user.session_version, updated);
+  await db.insertAuditLog(database, user.username, 'mfa_recovery_codes_regenerated', '重新生成恢复码', 'warning');
+  return c.json({ success: true, recovery_codes: recovery.codes });
+});
+
+adminRoutes.post('/account/mfa/disable', async (c) => {
+  const database = getDatabase(c.env);
+  const user = await db.getUserByUuid(database, c.get('userId')!);
+  if (!user) return c.json({ error: '用户不存在' }, 404);
+  if (!user.totp_enabled_at) return c.json({ success: true });
+
+  const updated = await db.disableUserTotp(database, user.uuid);
+  if (!updated) return c.json({ error: '用户不存在' }, 404);
+  await replaceRotatedAdminSession(c, user.session_version, updated);
+  await db.insertAuditLog(database, user.username, 'mfa_disabled', '关闭 TOTP 双重身份验证', 'warning');
+  return c.json({ success: true });
+});
+
+adminRoutes.post('/account/mfa/step-up', async (c) => {
+  const parsed = await readAdminJsonObject(c);
+  if (!parsed.ok) return parsed.response;
+  const method = readMfaMethod(parsed.body.method);
+  const code = typeof parsed.body.code === 'string' ? parsed.body.code.trim() : '';
+  if (!method || !code || code.length > 128) {
+    return c.json({ code: 'MFA_INPUT_INVALID', error: '双重身份验证参数无效' }, 400);
+  }
+
+  const database = getDatabase(c.env);
+  const user = await db.getUserByUuid(database, c.get('userId')!);
+  if (!user) return c.json({ error: '用户不存在' }, 404);
+  if (!user.totp_enabled_at || !user.totp_secret_enc) {
+    return c.json({ error: '尚未启用双重身份验证' }, 409);
+  }
+
+  const clientIp = getCloudflareClientIp(c);
+  const buckets = mfaRateLimitBuckets(clientIp, user.uuid);
+  const nowMs = Date.now();
+  const states = await loadLoginRateLimitStates(database, buckets);
+  const retryAfter = getLoginRetryAfterSeconds(states, nowMs);
+  if (retryAfter > 0) {
+    c.header('Retry-After', String(retryAfter));
+    return c.json({ code: 'MFA_RATE_LIMITED', error: `验证尝试过于频繁，请 ${retryAfter} 秒后再试` }, 429);
+  }
+
+  let verified = false;
+  try {
+    verified = await verifyUserMfaFactor(database, user, method, code, c.env);
+  } catch (error) {
+    if (error instanceof AuthConfigurationError) {
+      return c.json({ error: '服务端 JWT_SECRET 未正确配置' }, 500);
+    }
+    console.error('[auth] failed to verify MFA step-up:', sanitizeSetupDiagnosticDetail(error));
+    return c.json({ error: '双重身份验证配置损坏，请使用管理员恢复功能' }, 500);
+  }
+  if (!verified) {
+    const failedAt = Date.now();
+    await recordLoginFailure(database, buckets, failedAt, states);
+    await auditLoginFailure(database, user.username, clientIp, 'invalid_mfa_step_up', failedAt);
+    return c.json({ code: 'MFA_INVALID', error: '验证码或恢复码无效' }, 401);
+  }
+
+  await clearLoginFailures(database, buckets);
+  const token = await generateMfaToken({
+    userId: user.uuid,
+    username: user.username,
+    sessionVersion: user.session_version,
+    purpose: 'mfa-step-up',
+  }, c.env);
+  setMfaStepUpCookie(c, token);
+  await db.insertAuditLog(database, user.username, 'mfa_step_up', '完成敏感操作二次确认');
+  return c.json({ success: true, expires_in: 300 });
+});
 // 修改用户名
 adminRoutes.post('/account/username', async (c) => {
   try {
@@ -2520,6 +2755,7 @@ adminRoutes.post('/account/username', async (c) => {
     }
 
     setAdminSessionCookie(c, token);
+    clearMfaStepUpCookie(c);
     await db.insertAuditLog(database, oldUsername, 'account_username_edit', `修改用户名: ${oldUsername} -> ${nextUsername}`);
 
     return c.json({
@@ -2582,6 +2818,7 @@ adminRoutes.post('/account/chpasswd', async (c) => {
       throw error;
     }
     setAdminSessionCookie(c, token);
+    clearMfaStepUpCookie(c);
     await db.insertAuditLog(database, username, 'chpasswd', '修改密码');
 
     return c.json({ success: true });

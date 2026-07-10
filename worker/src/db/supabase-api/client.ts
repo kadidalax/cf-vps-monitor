@@ -913,6 +913,49 @@ export function getSupabaseUserByUuid(env: SupabaseApiEnv, uuid: string): Promis
   return callSupabaseRpc<User | null>(env, 'cfm_user_by_uuid', { input_uuid: uuid });
 }
 
+export function enableSupabaseUserTotp(
+  env: SupabaseApiEnv,
+  uuid: string,
+  secretEnc: string,
+  recoveryCodeHashes: string[],
+  usedStep: number,
+): Promise<User | null> {
+  return callSupabaseRpc<User | null>(env, 'cfm_enable_user_totp', {
+    input_uuid: uuid,
+    input_secret_enc: secretEnc,
+    input_recovery_code_hashes: recoveryCodeHashes,
+    input_used_step: usedStep,
+  });
+}
+
+export function disableSupabaseUserTotp(env: SupabaseApiEnv, uuid: string): Promise<User | null> {
+  return callSupabaseRpc<User | null>(env, 'cfm_disable_user_totp', { input_uuid: uuid });
+}
+
+export function replaceSupabaseUserRecoveryCodes(
+  env: SupabaseApiEnv,
+  uuid: string,
+  recoveryCodeHashes: string[],
+): Promise<User | null> {
+  return callSupabaseRpc<User | null>(env, 'cfm_replace_user_recovery_codes', {
+    input_uuid: uuid,
+    input_recovery_code_hashes: recoveryCodeHashes,
+  });
+}
+
+export function consumeSupabaseTotpStep(env: SupabaseApiEnv, uuid: string, step: number): Promise<boolean> {
+  return callSupabaseRpc<boolean>(env, 'cfm_consume_totp_step', {
+    input_uuid: uuid,
+    input_step: step,
+  });
+}
+
+export function consumeSupabaseRecoveryCode(env: SupabaseApiEnv, uuid: string, codeHash: string): Promise<boolean> {
+  return callSupabaseRpc<boolean>(env, 'cfm_consume_recovery_code', {
+    input_uuid: uuid,
+    input_code_hash: codeHash,
+  });
+}
 export function updateSupabaseUserUsername(env: SupabaseApiEnv, uuid: string, username: string): Promise<void> {
   return callSupabaseRpc<void>(env, 'cfm_update_user_username', {
     input_uuid: uuid,

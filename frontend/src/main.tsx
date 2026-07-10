@@ -5,6 +5,7 @@ import { Theme } from '@radix-ui/themes';
 import '@radix-ui/themes/styles.css';
 import './index.css';
 import App from './App';
+import MfaStepUpDialog from './components/MfaStepUpDialog';
 import { getLocalStorageItem } from './utils/browserStorage';
 import { getExplicitThemeAppearance, normalizeThemeMode } from './utils/themeAppearance';
 import type { ThemeMode } from './utils/themeAppearance';
@@ -65,6 +66,7 @@ const Root = () => {
           panelBackground="translucent"
         >
           <App />
+          <MfaStepUpDialog />
         </Theme>
       </BrowserRouter>
     </React.StrictMode>
