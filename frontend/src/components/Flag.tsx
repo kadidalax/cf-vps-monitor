@@ -110,16 +110,15 @@ export function resolveFlagCode(region?: string): string {
   const directAlias = aliasToCountryCode.get(normalized);
   if (directAlias) return directAlias;
 
+  for (const [alias, code] of aliasToCountryCode.entries()) {
+    if (/^[a-z]{2}$/i.test(alias)) continue;
+    if (normalized.includes(alias)) return code;
+  }
+
   const standaloneCode = raw.match(/(?:^|[^a-zA-Z])([a-zA-Z]{2})(?=$|[^a-zA-Z])/);
   if (standaloneCode) {
     const normalizedCode = standaloneCode[1].toUpperCase();
     return aliasToCountryCode.get(normalizeAlias(normalizedCode)) || normalizedCode;
-  }
-
-  for (const [alias, code] of aliasToCountryCode.entries()) {
-    if (alias.length > 2 && (normalized.includes(alias) || alias.includes(normalized))) {
-      return code;
-    }
   }
 
   return DEFAULT_FLAG_CODE;
