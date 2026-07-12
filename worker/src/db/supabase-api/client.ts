@@ -372,7 +372,7 @@ export function setSupabaseOfflineNotifications(env: SupabaseApiEnv, items: Offl
   return callSupabaseRpc<number>(env, 'cfm_set_offline_notifications', { input_items: items });
 }
 
-export function markSupabaseOfflineNotificationSent(env: SupabaseApiEnv, client: string, time: string): Promise<void> {
+export function markSupabaseOfflineNotificationSent(env: SupabaseApiEnv, client: string, time: string | null): Promise<void> {
   return callSupabaseRpc<void>(env, 'cfm_mark_offline_notification_sent', {
     input_client: client,
     input_time: time,

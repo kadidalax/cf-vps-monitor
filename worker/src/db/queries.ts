@@ -608,7 +608,7 @@ export async function setOfflineNotifications(database: QueryDatabase, items: t.
   return sba.setSupabaseOfflineNotifications(database.env, items);
 }
 
-export async function markOfflineNotificationSent(database: QueryDatabase, client: string, time: string): Promise<void> {
+export async function markOfflineNotificationSent(database: QueryDatabase, client: string, time: string | null): Promise<void> {
   return sba.markSupabaseOfflineNotificationSent(database.env, client, time);
 }
 

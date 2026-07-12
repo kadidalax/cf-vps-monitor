@@ -76,6 +76,20 @@ export function buildOfflineNotification(input: {
   });
 }
 
+export function buildNodeRecoveryNotification(input: {
+  nodeName: string;
+  recoveredAt: string;
+  eventTime?: string | Date;
+}): NotificationMessage {
+  return eventMessage({
+    emoji: '🟢',
+    event: '恢复上线',
+    clients: input.nodeName,
+    message: `节点已恢复上报；最新上报 ${formatNotificationTime(input.recoveredAt)}`,
+    time: input.eventTime,
+  });
+}
+
 export function buildExpiryNotification(input: {
   nodeName: string;
   expiredAt: string;

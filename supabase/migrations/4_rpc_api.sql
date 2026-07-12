@@ -1042,9 +1042,14 @@ as $$
     from parsed
     on conflict (client) do update set
       enable = excluded.enable,
-      grace_period = excluded.grace_period
+      grace_period = excluded.grace_period,
+      last_notified = case
+        when excluded.enable = 0 then null
+        else offline_notifications.last_notified
+      end
     where offline_notifications.enable is distinct from excluded.enable
        or offline_notifications.grace_period is distinct from excluded.grace_period
+       or (excluded.enable = 0 and offline_notifications.last_notified is not null)
     returning client
   )
   select count(*)::integer from upserted;
@@ -1056,7 +1061,7 @@ language sql
 set search_path = public
 as $$
   update offline_notifications
-  set last_notified = input_time::timestamptz
+  set last_notified = nullif(input_time, '')::timestamptz
   where client = input_client;
 $$;
 

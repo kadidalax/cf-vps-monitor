@@ -36,11 +36,13 @@ import {
 import {
   buildExpiryNotification,
   buildLoadNotification,
+  buildNodeRecoveryNotification,
   buildOfflineNotification,
   buildWebsiteAlertNotification,
   buildWebsiteRecoveryNotification,
   type NotificationMessage,
 } from './utils/notification-templates';
+import { evaluateOfflineNotificationEvent } from './utils/offline-notification';
 import type {
   Client as MonitorClient,
   ExpiryNotification,
@@ -540,52 +542,6 @@ async function runRecordCleanup(context: ScheduledRunContext, now: Date): Promis
   })}`);
 }
 
-type OfflineNotificationCandidate = {
-  offlineMs: number;
-  lastSeenLabel: string;
-  neverReported: boolean;
-  createdAt?: string;
-};
-
-export function evaluateOfflineNotificationCandidate(args: {
-  now: Date;
-  clientCreatedAt: string | null | undefined;
-  lastTime: string | null | undefined;
-  lastNotified: string | null | undefined;
-  gracePeriodSec: number;
-  notifyNeverReported: boolean;
-}): OfflineNotificationCandidate | null {
-  const graceMs = Math.max(30, Number(args.gracePeriodSec || 180)) * 1000;
-  const nowMs = args.now.getTime();
-
-  let referenceTime: string;
-  let neverReported = false;
-
-  if (args.lastTime) {
-    referenceTime = args.lastTime;
-  } else {
-    if (!args.notifyNeverReported || !args.clientCreatedAt) return null;
-    referenceTime = args.clientCreatedAt;
-    neverReported = true;
-  }
-
-  const referenceMs = new Date(referenceTime).getTime();
-  if (Number.isNaN(referenceMs)) return null;
-
-  const offlineMs = nowMs - referenceMs;
-  if (offlineMs < graceMs) return null;
-
-  const lastNotifiedMs = args.lastNotified ? new Date(args.lastNotified).getTime() : 0;
-  if (!Number.isNaN(lastNotifiedMs) && lastNotifiedMs && nowMs - lastNotifiedMs < graceMs) return null;
-
-  return {
-    offlineMs,
-    lastSeenLabel: neverReported ? '从未上报' : referenceTime,
-    neverReported,
-    createdAt: neverReported ? referenceTime : undefined,
-  };
-}
-
 async function runOfflineCheck(context: ScheduledRunContext, now: Date): Promise<void> {
   const notifications = await db.listOfflineNotifications(context.database, true);
   const enabled: OfflineNotification[] = notifications.filter(item => item.enable);
@@ -607,7 +563,7 @@ async function runOfflineCheck(context: ScheduledRunContext, now: Date): Promise
     if (!client) continue;
 
     const gracePeriod = Math.max(30, Number(item.grace_period || 180));
-    const candidate = evaluateOfflineNotificationCandidate({
+    const event = evaluateOfflineNotificationEvent({
       now,
       clientCreatedAt: client.created_at,
       lastTime: latestMap.get(item.client),
@@ -615,19 +571,28 @@ async function runOfflineCheck(context: ScheduledRunContext, now: Date): Promise
       gracePeriodSec: gracePeriod,
       notifyNeverReported,
     });
-    if (!candidate) continue;
+    if (!event) continue;
 
-    const minutes = Math.floor(candidate.offlineMs / 60000);
-    const message = buildOfflineNotification({
+    if (event.type === 'offline') {
+      const sent = await sendNotification(context, buildOfflineNotification({
+        nodeName: client.name || client.uuid,
+        offlineMinutes: Math.floor(event.offlineMs / 60000),
+        lastSeen: event.lastSeenLabel,
+        createdAt: event.createdAt,
+        eventTime: now,
+      }));
+      await db.markOfflineNotificationSent(context.database, item.client, now.toISOString());
+      await db.insertAuditLog(context.database, 'system', 'offline_notify', `${sent ? '已发送' : '已记录'}离线告警: ${client.name || client.uuid}${event.neverReported ? ' (从未上报)' : ''}`);
+      continue;
+    }
+
+    const sent = await sendNotification(context, buildNodeRecoveryNotification({
       nodeName: client.name || client.uuid,
-      offlineMinutes: minutes,
-      lastSeen: candidate.lastSeenLabel,
-      createdAt: candidate.createdAt,
+      recoveredAt: event.recoveredAt,
       eventTime: now,
-    });
-    const sent = await sendNotification(context, message);
-    await db.markOfflineNotificationSent(context.database, item.client, now.toISOString());
-    await db.insertAuditLog(context.database, 'system', 'offline_notify', `${sent ? '已发送' : '已记录'}离线告警: ${client.name || client.uuid}${candidate.neverReported ? ' (从未上报)' : ''}`);
+    }));
+    await db.markOfflineNotificationSent(context.database, item.client, null);
+    await db.insertAuditLog(context.database, 'system', 'online_notify', `${sent ? '已发送' : '已记录'}恢复上线: ${client.name || client.uuid}`);
   }
 }
 
