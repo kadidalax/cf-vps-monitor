@@ -1,9 +1,43 @@
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
+import { BUNDLED_SUPABASE_MIGRATIONS } from '../../generated/supabase-migrations.ts';
 
+const migrationsUrl = new URL('../../../../supabase/migrations/', import.meta.url);
+const migrationFiles = (await readdir(migrationsUrl)).filter((name) => name.endsWith('.sql')).sort();
+assert.deepEqual(migrationFiles, [
+  '1_core_schema.sql',
+  '2_security_access.sql',
+  '3_feature_schema.sql',
+  '4_rpc_api.sql',
+  '5_runtime_defaults.sql',
+]);
+assert.deepEqual(BUNDLED_SUPABASE_MIGRATIONS.map(({ version }) => version), [
+  '1_core_schema',
+  '2_security_access',
+  '3_feature_schema',
+  '4_rpc_api',
+  '5_runtime_defaults',
+]);
+
+const featureSchemaSql = await readFile(new URL('3_feature_schema.sql', migrationsUrl), 'utf8');
 const migrationSql = await readFile(new URL('../../../../supabase/migrations/4_rpc_api.sql', import.meta.url), 'utf8');
+const runtimeDefaultsSql = await readFile(new URL('5_runtime_defaults.sql', migrationsUrl), 'utf8');
 const generatedSql = await readFile(new URL('../../generated/supabase-migrations.ts', import.meta.url), 'utf8');
+const agentRoutesSql = await readFile(new URL('../../routes/client.ts', import.meta.url), 'utf8');
+const allMigrationSql = await Promise.all(migrationFiles.map((name) => readFile(new URL(name, migrationsUrl), 'utf8'))).then((sources) => sources.join('\n'));
+
+assert.doesNotMatch(allMigrationSql, /^\+/m);
+assert.doesNotMatch(allMigrationSql, /set token\s*=\s*null/i);
+assert.doesNotMatch(allMigrationSql, /create or replace function public\.cfm_set_client_install_token/i);
+assert.doesNotMatch(allMigrationSql, /grant execute on function public\.cfm_set_client_install_token/i);
+assert.doesNotMatch(agentRoutesSql, /rotateClientToken\(/);
+assert.equal((allMigrationSql.match(/create or replace function public\.cfm_create_client\(/gi) || []).length, 1);
+assert.equal((allMigrationSql.match(/create or replace function public\.cfm_rotate_client_token\(input_uuid text, input_token text, input_token_hash text\)/gi) || []).length, 1);
+assert.doesNotMatch(allMigrationSql, /create or replace function public\.cfm_rotate_client_token\(input_uuid text, input_token_hash text\)/i);
+assert.match(migrationSql, /insert into clients \(uuid, token, token_hash, token_rotated_at, name, sort_order\)[\s\S]*?input_client->>'token',[\s\S]*?input_client->>'token_hash'/i);
+assert.match(migrationSql, /create or replace function public\.cfm_rotate_client_token\(input_uuid text, input_token text, input_token_hash text\)[\s\S]*?set token = input_token,[\s\S]*?token_hash = input_token_hash/i);
+assert.doesNotMatch(featureSchemaSql, /create or replace function public\.cfm_(?:create_client|rotate_client_token)\(/i);
+assert.doesNotMatch(runtimeDefaultsSql, /create or replace function public\.cfm_(?:create_client|rotate_client_token)\(/i);
 
 for (const source of [migrationSql, generatedSql]) {
   assert.doesNotMatch(source, /revoke all on function public\.cfm_public_website_monitor\(integer, integer\)/);
@@ -12,11 +46,7 @@ for (const source of [migrationSql, generatedSql]) {
 
 assert.match(migrationSql, /drop function if exists public\.cfm_public_website_monitor\(integer, integer\);/);
 
-const mfaMigrationUrl = new URL('../../../../supabase/migrations/7_totp_two_factor_authentication.sql', import.meta.url);
-assert.ok(existsSync(mfaMigrationUrl), 'migration 7 must define TOTP two-factor authentication');
-
-const mfaMigrationSql = await readFile(mfaMigrationUrl, 'utf8');
-const mfaSources = [mfaMigrationSql, generatedSql];
+const mfaSources = [featureSchemaSql + migrationSql, generatedSql];
 const mfaFunctions = [
   'cfm_enable_user_totp',
   'cfm_disable_user_totp',
@@ -40,9 +70,10 @@ for (const source of mfaSources) {
   }
 }
 
-assert.match(mfaMigrationSql, /create or replace function public\.cfm_recover_single_admin\(/i);
-assert.match(mfaMigrationSql, /totp_secret_enc\s*=\s*null/i);
-assert.match(mfaMigrationSql, /totp_enabled_at\s*=\s*null/i);
-assert.match(mfaMigrationSql, /totp_last_used_step\s*=\s*-1/i);
-assert.match(mfaMigrationSql, /recovery_code_hashes\s*=\s*'\[\]'::jsonb/i);
-assert.match(mfaMigrationSql, /input_code_hash\s*!~\s*'\^\[A-Za-z0-9_-\]\{43\}\$'/i);
+assert.match(migrationSql, /create or replace function public\.cfm_recover_single_admin\(/i);
+assert.match(migrationSql, /totp_secret_enc\s*=\s*null/i);
+assert.match(migrationSql, /totp_enabled_at\s*=\s*null/i);
+assert.match(migrationSql, /totp_last_used_step\s*=\s*-1/i);
+assert.match(migrationSql, /recovery_code_hashes\s*=\s*'\[\]'::jsonb/i);
+assert.match(migrationSql, /input_code_hash\s*!~\s*'\^\[A-Za-z0-9_-\]\{43\}\$'/i);
+assert.match(runtimeDefaultsSql, /\('webhook_url', ''\)/i);

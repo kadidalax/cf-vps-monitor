@@ -287,27 +287,6 @@ async function recordAgentTokenSourceIpChange(
   );
 }
 
-function isPendingInstallTokenMatch(client: { token?: string }, token: string): boolean {
-  return Boolean(client.token && client.token === token && isAgentTokenShape(token));
-}
-
-async function promotePendingInstallToken(
-  database: db.QueryDatabase,
-  env: Bindings,
-  client: db.Client | db.ClientIdentity,
-  token: string,
-  ip: string,
-): Promise<void> {
-  const updatedClient = await db.rotateClientToken(database, client.uuid, token);
-  if (!updatedClient) return;
-  invalidateAgentClientAuthCache({ uuid: client.uuid, token });
-  await upsertLiveAgentAuthClient(env, updatedClient).catch(() => undefined);
-  const tokenUsageUpdated = await db.markClientTokenUsed(database, client.uuid, ip).catch(() => false);
-  if (tokenUsageUpdated) {
-    await recordAgentTokenSourceIpChange(database, updatedClient, ip).catch(() => undefined);
-  }
-}
-
 export async function getAgentClientByToken(
   database: db.QueryDatabase,
   token: string,
@@ -337,14 +316,11 @@ export async function getAgentClientByToken(
 
   const client = await db.getClientByToken(database, token, true);
   if (client) {
-    const pendingInstallToken = isPendingInstallTokenMatch(client, token);
     const cachedClient = stripCachedAgentToken(client);
     setAgentAuthCache(agentAuthCache, cacheKey, cachedClient, AGENT_AUTH_CACHE_MS, now);
-    if (!pendingInstallToken && deferBackground) deferBackground(upsertLiveAgentAuthClient(env, client));
+    if (deferBackground) deferBackground(upsertLiveAgentAuthClient(env, client));
     onAuthSource?.('db');
-    const tokenUsageTask = pendingInstallToken
-      ? promotePendingInstallToken(database, env, client, token, ip)
-      : markAgentTokenUsedIfDue(database, client, cacheKey, ip, now);
+    const tokenUsageTask = markAgentTokenUsedIfDue(database, client, cacheKey, ip, now);
     if (deferBackground) deferBackground(tokenUsageTask);
     else await tokenUsageTask;
     return cachedClient;
@@ -384,13 +360,10 @@ export async function getAgentClientIdentityByToken(
 
   const client = await db.getClientIdentityByToken(database, token, true);
   if (client) {
-    const pendingInstallToken = isPendingInstallTokenMatch(client, token);
     const cachedClient = stripCachedAgentToken(client);
     setAgentAuthCache(agentIdentityAuthCache, cacheKey, cachedClient, AGENT_AUTH_CACHE_MS, now);
     onAuthSource?.('db');
-    const tokenUsageTask = pendingInstallToken
-      ? promotePendingInstallToken(database, env, client, token, ip)
-      : markAgentTokenUsedIfDue(database, client, cacheKey, ip, now);
+    const tokenUsageTask = markAgentTokenUsedIfDue(database, client, cacheKey, ip, now);
     if (deferBackground) deferBackground(tokenUsageTask);
     else await tokenUsageTask;
     return cachedClient;

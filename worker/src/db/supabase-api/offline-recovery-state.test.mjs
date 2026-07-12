@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { BUNDLED_SUPABASE_MIGRATIONS } from '../../generated/supabase-migrations.ts';
 
-const migration = await readFile(new URL('../../../../supabase/migrations/8_offline_recovery_state.sql', import.meta.url), 'utf8');
-const generated = BUNDLED_SUPABASE_MIGRATIONS.find(({ version }) => version === '8_offline_recovery_state')?.sql;
+const migration = await readFile(new URL('../../../../supabase/migrations/4_rpc_api.sql', import.meta.url), 'utf8');
+const generated = BUNDLED_SUPABASE_MIGRATIONS.find(({ version }) => version === '4_rpc_api')?.sql;
 assert.ok(generated);
 
 for (const source of [migration, generated]) {

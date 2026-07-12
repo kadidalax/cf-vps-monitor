@@ -256,7 +256,7 @@ as $$
   insert into clients (uuid, token, token_hash, token_rotated_at, name, sort_order)
   values (
     coalesce(nullif(input_client->>'uuid', ''), gen_random_uuid()::text),
-    null,
+    input_client->>'token',
     input_client->>'token_hash',
     now(),
     coalesce(input_client->>'name', ''),
@@ -303,13 +303,13 @@ begin
 end;
 $$;
 
-create or replace function public.cfm_rotate_client_token(input_uuid text, input_token_hash text)
+create or replace function public.cfm_rotate_client_token(input_uuid text, input_token text, input_token_hash text)
 returns jsonb
 language sql
 set search_path = public
 as $$
   update clients
-  set token = null,
+  set token = input_token,
       token_hash = input_token_hash,
       token_last_used_at = null,
       token_last_used_ip = '',
@@ -378,18 +378,6 @@ language sql
 set search_path = public
 as $$
   select public.cfm_update_client_returning(input_uuid, input_patch) is not null;
-$$;
-
-create or replace function public.cfm_set_client_install_token(input_uuid text, input_token text)
-returns jsonb
-language sql
-set search_path = public
-as $$
-  update clients
-  set token = input_token,
-      updated_at = now()
-  where uuid = input_uuid
-  returning to_jsonb(clients);
 $$;
 
 create or replace function public.cfm_delete_clients(input_uuids jsonb)
@@ -2906,10 +2894,13 @@ revoke all on function public.cfm_mark_client_token_used(text, text) from anon;
 revoke all on function public.cfm_mark_client_token_used(text, text) from authenticated;
 grant execute on function public.cfm_mark_client_token_used(text, text) to service_role;
 
-revoke all on function public.cfm_rotate_client_token(text, text) from public;
-revoke all on function public.cfm_rotate_client_token(text, text) from anon;
-revoke all on function public.cfm_rotate_client_token(text, text) from authenticated;
-grant execute on function public.cfm_rotate_client_token(text, text) to service_role;
+drop function if exists public.cfm_rotate_client_token(text, text);
+drop function if exists public.cfm_set_client_install_token(text, text);
+
+revoke all on function public.cfm_rotate_client_token(text, text, text) from public;
+revoke all on function public.cfm_rotate_client_token(text, text, text) from anon;
+revoke all on function public.cfm_rotate_client_token(text, text, text) from authenticated;
+grant execute on function public.cfm_rotate_client_token(text, text, text) to service_role;
 
 revoke all on function public.cfm_update_client(text, jsonb) from public;
 revoke all on function public.cfm_update_client(text, jsonb) from anon;
@@ -2920,11 +2911,6 @@ revoke all on function public.cfm_update_client_returning(text, jsonb) from publ
 revoke all on function public.cfm_update_client_returning(text, jsonb) from anon;
 revoke all on function public.cfm_update_client_returning(text, jsonb) from authenticated;
 grant execute on function public.cfm_update_client_returning(text, jsonb) to service_role;
-
-revoke all on function public.cfm_set_client_install_token(text, text) from public;
-revoke all on function public.cfm_set_client_install_token(text, text) from anon;
-revoke all on function public.cfm_set_client_install_token(text, text) from authenticated;
-grant execute on function public.cfm_set_client_install_token(text, text) to service_role;
 
 revoke all on function public.cfm_delete_clients(jsonb) from public;
 revoke all on function public.cfm_delete_clients(jsonb) from anon;
@@ -4613,3 +4599,315 @@ revoke all on function public.cfm_recover_single_admin(text, text, text) from au
 grant execute on function public.cfm_recover_single_admin(text, text, text) to service_role;
 
 notify pgrst, 'reload schema';
+
+-- -----------------------------------------------------------------------------
+
+-- Source: 20260710000000_totp_two_factor_authentication.sql
+create or replace function public.cfm_login_user(input_username text)
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  select to_jsonb(row_data)
+  from (
+    select uuid, username, passwd, session_version, password_changed_at,
+           totp_secret_enc, totp_enabled_at, totp_last_used_step, recovery_code_hashes,
+           created_at, updated_at
+    from users
+    where username = input_username
+    limit 1
+  ) row_data;
+$$;
+
+create or replace function public.cfm_user_by_uuid(input_uuid text)
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  select to_jsonb(row_data)
+  from (
+    select uuid, username, passwd, session_version, password_changed_at,
+           totp_secret_enc, totp_enabled_at, totp_last_used_step, recovery_code_hashes,
+           created_at, updated_at
+    from users
+    where uuid = input_uuid
+    limit 1
+  ) row_data;
+$$;
+create or replace function public.cfm_enable_user_totp(
+  input_uuid text,
+  input_secret_enc text,
+  input_recovery_code_hashes jsonb,
+  input_used_step bigint
+)
+returns jsonb
+language plpgsql
+set search_path = public
+as $$
+declare
+  updated_user users%rowtype;
+begin
+  if nullif(trim(coalesce(input_uuid, '')), '') is null
+    or nullif(trim(coalesce(input_secret_enc, '')), '') is null
+    or input_used_step < 0
+    or jsonb_typeof(input_recovery_code_hashes) is distinct from 'array'
+    or jsonb_array_length(input_recovery_code_hashes) <> 8
+  then
+    raise exception 'invalid TOTP enrollment data';
+  end if;
+
+  update users
+  set totp_secret_enc = input_secret_enc,
+      totp_enabled_at = now(),
+      totp_last_used_step = input_used_step,
+      recovery_code_hashes = input_recovery_code_hashes,
+      session_version = session_version + 1,
+      updated_at = now()
+  where uuid = input_uuid
+  returning * into updated_user;
+
+  if not found then
+    return null;
+  end if;
+  return to_jsonb(updated_user);
+end;
+$$;
+
+create or replace function public.cfm_disable_user_totp(input_uuid text)
+returns jsonb
+language plpgsql
+set search_path = public
+as $$
+declare
+  updated_user users%rowtype;
+begin
+  update users
+  set totp_secret_enc = null,
+      totp_enabled_at = null,
+      totp_last_used_step = -1,
+      recovery_code_hashes = '[]'::jsonb,
+      session_version = session_version + 1,
+      updated_at = now()
+  where uuid = input_uuid
+  returning * into updated_user;
+
+  if not found then
+    return null;
+  end if;
+  return to_jsonb(updated_user);
+end;
+$$;
+
+create or replace function public.cfm_replace_user_recovery_codes(
+  input_uuid text,
+  input_recovery_code_hashes jsonb
+)
+returns jsonb
+language plpgsql
+set search_path = public
+as $$
+declare
+  updated_user users%rowtype;
+begin
+  if jsonb_typeof(input_recovery_code_hashes) is distinct from 'array'
+    or jsonb_array_length(input_recovery_code_hashes) <> 8
+  then
+    raise exception 'exactly eight recovery code hashes are required';
+  end if;
+
+  update users
+  set recovery_code_hashes = input_recovery_code_hashes,
+      session_version = session_version + 1,
+      updated_at = now()
+  where uuid = input_uuid
+    and totp_enabled_at is not null
+  returning * into updated_user;
+
+  if not found then
+    return null;
+  end if;
+  return to_jsonb(updated_user);
+end;
+$$;
+
+create or replace function public.cfm_consume_totp_step(input_uuid text, input_step bigint)
+returns boolean
+language plpgsql
+set search_path = public
+as $$
+begin
+  if input_step < 0 then
+    return false;
+  end if;
+
+  update users
+  set totp_last_used_step = input_step,
+      updated_at = now()
+  where uuid = input_uuid
+    and totp_enabled_at is not null
+    and totp_secret_enc is not null
+    and totp_last_used_step < input_step;
+
+  return found;
+end;
+$$;
+
+create or replace function public.cfm_consume_recovery_code(input_uuid text, input_code_hash text)
+returns boolean
+language plpgsql
+set search_path = public
+as $$
+begin
+  if input_code_hash !~ '^[A-Za-z0-9_-]{43}$' then
+    return false;
+  end if;
+
+  update users
+  set recovery_code_hashes = recovery_code_hashes - input_code_hash,
+      updated_at = now()
+  where uuid = input_uuid
+    and totp_enabled_at is not null
+    and recovery_code_hashes ? input_code_hash;
+
+  return found;
+end;
+$$;
+
+create or replace function public.cfm_recover_single_admin(input_uuid text, input_username text, input_passwd text)
+returns jsonb
+language plpgsql
+set search_path = public
+as $$
+declare
+  user_count integer;
+  target_uuid text;
+  recovered users%rowtype;
+begin
+  if nullif(trim(coalesce(input_uuid, '')), '') is null
+    or nullif(trim(coalesce(input_username, '')), '') is null
+    or coalesce(input_passwd, '') = ''
+  then
+    raise exception 'user uuid, username, and password hash are required';
+  end if;
+
+  select count(*)::integer into user_count from users;
+
+  if user_count = 0 then
+    insert into users (uuid, username, passwd, password_changed_at)
+    values (input_uuid, input_username, input_passwd, now())
+    returning * into recovered;
+  elsif user_count = 1 then
+    select uuid into target_uuid from users limit 1;
+    update users
+    set username = input_username,
+        passwd = input_passwd,
+        session_version = session_version + 1,
+        password_changed_at = now(),
+        totp_secret_enc = null,
+        totp_enabled_at = null,
+        totp_last_used_step = -1,
+        recovery_code_hashes = '[]'::jsonb,
+        updated_at = now()
+    where uuid = target_uuid
+    returning * into recovered;
+  else
+    raise exception 'admin recovery supports exactly one admin user';
+  end if;
+
+  return to_jsonb(recovered);
+end;
+$$;
+
+revoke all on function public.cfm_enable_user_totp(text, text, jsonb, bigint) from public;
+revoke all on function public.cfm_enable_user_totp(text, text, jsonb, bigint) from anon;
+revoke all on function public.cfm_enable_user_totp(text, text, jsonb, bigint) from authenticated;
+grant execute on function public.cfm_enable_user_totp(text, text, jsonb, bigint) to service_role;
+
+revoke all on function public.cfm_disable_user_totp(text) from public;
+revoke all on function public.cfm_disable_user_totp(text) from anon;
+revoke all on function public.cfm_disable_user_totp(text) from authenticated;
+grant execute on function public.cfm_disable_user_totp(text) to service_role;
+
+revoke all on function public.cfm_replace_user_recovery_codes(text, jsonb) from public;
+revoke all on function public.cfm_replace_user_recovery_codes(text, jsonb) from anon;
+revoke all on function public.cfm_replace_user_recovery_codes(text, jsonb) from authenticated;
+grant execute on function public.cfm_replace_user_recovery_codes(text, jsonb) to service_role;
+
+revoke all on function public.cfm_consume_totp_step(text, bigint) from public;
+revoke all on function public.cfm_consume_totp_step(text, bigint) from anon;
+revoke all on function public.cfm_consume_totp_step(text, bigint) from authenticated;
+grant execute on function public.cfm_consume_totp_step(text, bigint) to service_role;
+
+revoke all on function public.cfm_consume_recovery_code(text, text) from public;
+revoke all on function public.cfm_consume_recovery_code(text, text) from anon;
+revoke all on function public.cfm_consume_recovery_code(text, text) from authenticated;
+grant execute on function public.cfm_consume_recovery_code(text, text) to service_role;
+
+revoke all on function public.cfm_recover_single_admin(text, text, text) from public;
+revoke all on function public.cfm_recover_single_admin(text, text, text) from anon;
+revoke all on function public.cfm_recover_single_admin(text, text, text) from authenticated;
+grant execute on function public.cfm_recover_single_admin(text, text, text) to service_role;
+
+notify pgrst, 'reload schema';
+
+-- -----------------------------------------------------------------------------
+
+-- Source: 20260712000000_offline_recovery_state.sql
+set local search_path = public;
+
+create or replace function public.cfm_set_offline_notifications(input_items jsonb)
+returns integer
+language sql
+set search_path = public
+as $$
+  with parsed as (
+    select distinct on (client)
+      client,
+      case when lower(coalesce(item->>'enable', 'false')) in ('true', '1') then 1 else 0 end as enable,
+      coalesce(nullif(item->>'grace_period', '')::integer, 180) as grace_period,
+      ord
+    from jsonb_array_elements(coalesce(input_items, '[]'::jsonb)) with ordinality as value(item, ord)
+    cross join lateral (select trim(item->>'client') as client) normalized
+    where client <> ''
+    order by client, ord desc
+  ),
+  upserted as (
+    insert into offline_notifications (client, enable, grace_period)
+    select client, enable, grace_period
+    from parsed
+    on conflict (client) do update set
+      enable = excluded.enable,
+      grace_period = excluded.grace_period,
+      last_notified = case
+        when excluded.enable = 0 then null
+        else offline_notifications.last_notified
+      end
+    where offline_notifications.enable is distinct from excluded.enable
+       or offline_notifications.grace_period is distinct from excluded.grace_period
+       or (excluded.enable = 0 and offline_notifications.last_notified is not null)
+    returning client
+  )
+  select count(*)::integer from upserted;
+$$;
+
+create or replace function public.cfm_mark_offline_notification_sent(input_client text, input_time text)
+returns void
+language sql
+set search_path = public
+as $$
+  update offline_notifications
+  set last_notified = nullif(input_time, '')::timestamptz
+  where client = input_client;
+$$;
+
+revoke all on function public.cfm_set_offline_notifications(jsonb) from public;
+revoke all on function public.cfm_set_offline_notifications(jsonb) from anon;
+revoke all on function public.cfm_set_offline_notifications(jsonb) from authenticated;
+grant execute on function public.cfm_set_offline_notifications(jsonb) to service_role;
+
+revoke all on function public.cfm_mark_offline_notification_sent(text, text) from public;
+revoke all on function public.cfm_mark_offline_notification_sent(text, text) from anon;
+revoke all on function public.cfm_mark_offline_notification_sent(text, text) from authenticated;
+grant execute on function public.cfm_mark_offline_notification_sent(text, text) to service_role;

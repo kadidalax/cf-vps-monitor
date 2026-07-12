@@ -510,11 +510,6 @@ where coalesce(token_hash, '') = ''
 alter table public.clients
   alter column token drop not null;
 
-update public.clients
-set token = null
-where coalesce(token_hash, '') <> ''
-  and coalesce(token, '') <> '';
-
 do $$
 begin
   if not exists (
