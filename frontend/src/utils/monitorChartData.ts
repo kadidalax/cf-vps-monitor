@@ -3,11 +3,11 @@ export interface MonitorHistoryRecord {
   cpu?: number;
   ram?: number;
   ram_total?: number;
-  disk?: number;
-  disk_total?: number;
+  disk?: number | null;
+  disk_total?: number | null;
   net_in?: number;
   net_out?: number;
-  temp?: number;
+  temp?: number | null;
   connections?: number;
   connections_udp?: number;
   process_count?: number;
@@ -17,10 +17,10 @@ export interface MonitorChartPoint {
   time: number;
   cpu: number;
   ram: number;
-  disk: number;
+  disk: number | null;
   net_in: number;
   net_out: number;
-  temp: number;
+  temp: number | null;
   connections: number;
   connections_udp: number;
   process_count: number;
@@ -29,10 +29,10 @@ export interface MonitorChartPoint {
 const emptyMetricValues = {
   cpu: 0,
   ram: 0,
-  disk: 0,
+  disk: null,
   net_in: 0,
   net_out: 0,
-  temp: 0,
+  temp: null,
   connections: 0,
   connections_udp: 0,
   process_count: 0,
@@ -47,10 +47,11 @@ export function buildMonitorChartData(records: MonitorHistoryRecord[]): MonitorC
       : 0,
     net_in: record.net_in || 0,
     net_out: record.net_out || 0,
-    temp: record.temp || 0,
-    disk: record.disk_total && record.disk_total > 0
-      ? Number((((record.disk || 0) / record.disk_total) * 100).toFixed(1))
-      : 0,
+    temp: typeof record.temp === 'number' && Number.isFinite(record.temp) ? record.temp : null,
+    disk: typeof record.disk === 'number' && Number.isFinite(record.disk) && record.disk >= 0 &&
+      typeof record.disk_total === 'number' && Number.isFinite(record.disk_total) && record.disk_total > 0
+      ? Number(((record.disk / record.disk_total) * 100).toFixed(1))
+      : null,
     connections: record.connections || 0,
     connections_udp: record.connections_udp || 0,
     process_count: record.process_count || 0,

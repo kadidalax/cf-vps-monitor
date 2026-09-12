@@ -21,6 +21,8 @@ import { useDisplayTheme } from '../../contexts/DisplayThemeContext';
 import { clearCachedPublicSettings } from '../../utils/publicSettings';
 import { normalizeDisplayTheme } from '../../utils/displayTheme';
 import { notifyThemeUpdated } from '../../utils/themeEvents';
+import { fetchPublicBootstrap, type PublicBootstrapPayload } from '../../utils/publicBootstrap';
+import ThemePreviewFrame from '../../components/ThemePreviewFrame';
 
 type ThemeConfigItem = {
   key?: string;
@@ -71,7 +73,6 @@ function configLabel(item: ThemeConfigItem) {
   return item.name || item.key || '';
 }
 
-const PREVIEW_STYLE_ID = 'cf-monitor-theme-css-preview';
 
 const cssExampleSnippets = [
   {
@@ -125,20 +126,6 @@ const cssExampleSnippets = [
 
 const themeCssExamples = cssExampleSnippets.map(item => item.css).join('\n\n');
 
-function setPreviewCss(css: string) {
-  let style = document.getElementById(PREVIEW_STYLE_ID) as HTMLStyleElement | null;
-  if (!style) {
-    style = document.createElement('style');
-    style.id = PREVIEW_STYLE_ID;
-    document.head.appendChild(style);
-  }
-  style.textContent = css;
-}
-
-function clearPreviewCss() {
-  document.getElementById(PREVIEW_STYLE_ID)?.remove();
-}
-
 export default function AdminThemes() {
   const apiFetch = useApi();
   const { setDisplayTheme } = useDisplayTheme();
@@ -150,6 +137,16 @@ export default function AdminThemes() {
   const [editConfig, setEditConfig] = useState<Record<string, unknown>>({});
   const [customCss, setCustomCss] = useState('');
   const [deleting, setDeleting] = useState<ThemeCard | null>(null);
+  const [preview, setPreview] = useState<{ bootstrap: PublicBootstrapPayload; css: string } | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const previewRequestRef = useRef(0);
+
+  function clearPreviewCss() {
+    previewRequestRef.current += 1;
+    setPreview(null);
+    setPreviewing(false);
+    document.getElementById('cf-monitor-theme-css-preview')?.remove();
+  }
 
   async function loadThemes() {
     setLoading(true);
@@ -168,7 +165,7 @@ export default function AdminThemes() {
   }, []);
 
   useEffect(() => {
-    return clearPreviewCss;
+    return () => { previewRequestRef.current += 1; };
   }, []);
 
   async function handleUpload(file: File | null) {
@@ -226,9 +223,19 @@ export default function AdminThemes() {
     setCustomCss(current => [current.trimEnd(), css].filter(Boolean).join('\n\n'));
   }
 
-  function previewCustomCss() {
-    setPreviewCss(customCss);
-    toast.success('已临时预览，仅当前浏览器生效');
+  async function previewCustomCss() {
+    const request = ++previewRequestRef.current;
+    setPreviewing(true);
+    try {
+      const bootstrap = await fetchPublicBootstrap({ cacheBust: true });
+      if (request !== previewRequestRef.current) return;
+      setPreview({ bootstrap, css: customCss });
+      toast.success('前台主题预览已更新');
+    } catch (error) {
+      if (request === previewRequestRef.current) toast.error(error instanceof Error ? error.message : '预览加载失败');
+    } finally {
+      if (request === previewRequestRef.current) setPreviewing(false);
+    }
   }
 
   function restoreCustomCss() {
@@ -459,8 +466,8 @@ export default function AdminThemes() {
               <pre>{themeCssExamples}</pre>
             </Box>
             <Flex justify="end" gap="2">
-              <Button variant="soft" onClick={previewCustomCss}>
-                <Eye size={14} />预览
+              <Button variant="soft" onClick={() => void previewCustomCss()} disabled={previewing}>
+                <Eye size={14} />{previewing ? '加载预览…' : '预览'}
               </Button>
               <Button variant="soft" onClick={restoreCustomCss}>
                 <RotateCcw size={14} />恢复
@@ -468,6 +475,7 @@ export default function AdminThemes() {
               <Dialog.Close><Button variant="soft">取消</Button></Dialog.Close>
               <Button disabled={saving} onClick={() => void saveConfig()}>保存</Button>
             </Flex>
+            {preview && <ThemePreviewFrame bootstrap={preview.bootstrap} css={preview.css} />}
           </Flex>
         </Dialog.Content>
       </Dialog.Root>

@@ -2,6 +2,7 @@ import {
   buildWebsiteAlertNotification,
   buildWebsiteRecoveryNotification,
 } from './notification-templates.ts';
+import { consumeScheduledSubrequests, currentScheduledBudget, scheduledFetch, ScheduledBudgetExceeded } from './scheduled-budget.ts';
 
 export type WebsiteMonitorStatus = 'pending' | 'up' | 'down' | 'paused';
 export type WebsiteMonitorMethod = 'GET' | 'HEAD' | 'TCP';
@@ -50,6 +51,7 @@ export interface WebsiteFetchResult {
 
 export type WebsiteProbeMonitor = {
   id: number;
+  config_revision: string;
   url: string;
   method: WebsiteMonitorMethod;
   timeout_sec: number;
@@ -64,6 +66,7 @@ type MaybeDueMonitor = {
 };
 
 type MaybeAlertMonitor = {
+  enabled: boolean;
   status: string;
   grace_period_sec: number;
   down_since: string | null;
@@ -149,6 +152,7 @@ function isUnsafeHostname(hostname: string): boolean {
   const ipv4 = parseIPv4(host);
   if (ipv4) return isBlockedIPv4(ipv4);
   if (IPV4_BLOCKS.some(pattern => pattern.test(host))) return true;
+  if (!host.includes(':')) return false;
   if (isIPv4MappedIPv6(host)) return true;
   if (host === '::' || host === '::1') return true;
   if (/^(fc|fd|fe8|fe9|fea|feb|ff)/.test(host)) return true;
@@ -295,6 +299,7 @@ export function normalizeWebsiteFetchResult(input: WebsiteFetchNormalizationInpu
 
 export async function checkWebsiteMonitorTcp(monitor: WebsiteProbeMonitor, connector?: TcpConnector): Promise<{
   monitor_id: number;
+  config_revision: string;
   checked_at: string;
   ok: boolean;
   effective_status: 'up' | 'down';
@@ -306,20 +311,24 @@ export async function checkWebsiteMonitorTcp(monitor: WebsiteProbeMonitor, conne
 }> {
   const started = Date.now();
   const checkedAt = new Date(started).toISOString();
+  const configRevision = monitor.config_revision;
   let socket: TcpSocket | null = null;
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
   try {
     const url = new URL(monitor.url);
     const urlError = validateTcpUrl(url);
     if (urlError) throw new Error(urlError);
+    consumeScheduledSubrequests();
     const connect = connector || ((await import('cloudflare:sockets')).connect as TcpConnector);
     socket = connect(
       { hostname: url.hostname, port: Number(url.port) },
       { secureTransport: 'off', allowHalfOpen: false },
     );
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => reject(new Error('timeout')), Math.max(1, monitor.timeout_sec) * 1000);
+      timeoutId = setTimeout(() => reject(currentScheduledBudget()?.remainingMs() === 0
+        ? new ScheduledBudgetExceeded() : new Error('timeout')),
+      Math.min(Math.max(1, monitor.timeout_sec) * 1000, currentScheduledBudget()?.remainingMs() ?? Infinity));
     });
     await Promise.race([socket.opened, timeout]);
     if (timeoutId) clearTimeout(timeoutId);
@@ -327,6 +336,7 @@ export async function checkWebsiteMonitorTcp(monitor: WebsiteProbeMonitor, conne
     const latency_ms = Math.max(0, Math.round(Date.now() - started));
     return {
       monitor_id: monitor.id,
+      config_revision: configRevision,
       checked_at: checkedAt,
       ok: true,
       effective_status: 'up',
@@ -338,6 +348,7 @@ export async function checkWebsiteMonitorTcp(monitor: WebsiteProbeMonitor, conne
     };
   } catch (error) {
     try { await socket?.close(); } catch {}
+    if (error instanceof ScheduledBudgetExceeded) throw error;
     const normalized = normalizeWebsiteFetchResult({
       latencyMs: Date.now() - started,
       min: monitor.expected_status_min,
@@ -346,6 +357,7 @@ export async function checkWebsiteMonitorTcp(monitor: WebsiteProbeMonitor, conne
     });
     return {
       monitor_id: monitor.id,
+      config_revision: configRevision,
       checked_at: checkedAt,
       ok: false,
       effective_status: 'down',
@@ -355,11 +367,14 @@ export async function checkWebsiteMonitorTcp(monitor: WebsiteProbeMonitor, conne
       latency_ms: normalized.latency_ms,
       error: normalized.error,
     };
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
   }
 }
 
 export async function checkWebsiteMonitorHttp(monitor: WebsiteProbeMonitor): Promise<{
   monitor_id: number;
+  config_revision: string;
   checked_at: string;
   ok: boolean;
   effective_status: 'up' | 'down';
@@ -373,6 +388,7 @@ export async function checkWebsiteMonitorHttp(monitor: WebsiteProbeMonitor): Pro
 
   const started = Date.now();
   const checkedAt = new Date(started).toISOString();
+  const configRevision = monitor.config_revision;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Math.max(1, monitor.timeout_sec) * 1000);
 
@@ -381,20 +397,20 @@ export async function checkWebsiteMonitorHttp(monitor: WebsiteProbeMonitor): Pro
     const initialUrlError = validateWebsiteUrl(url);
     if (initialUrlError) throw new Error(initialUrlError);
 
-    const response = await fetch(url.toString(), {
+    const response = await scheduledFetch(url.toString(), {
       method: monitor.method,
       redirect: 'manual',
       signal: controller.signal,
       headers: WEBSITE_PROBE_HEADERS,
     });
     const location = response.headers.get('Location');
+    if (response.body) await response.body.cancel().catch(() => undefined);
     if (location && response.status >= 300 && response.status <= 399) {
       const nextUrl = new URL(location, url);
       const redirectUrlError = validateWebsiteUrl(nextUrl);
       if (redirectUrlError) throw new Error('unsafe_redirect');
     }
 
-    if (response.body) await response.body.cancel().catch(() => undefined);
     const normalized = normalizeWebsiteFetchResult({
       status: response.status,
       latencyMs: Date.now() - started,
@@ -403,6 +419,7 @@ export async function checkWebsiteMonitorHttp(monitor: WebsiteProbeMonitor): Pro
     });
     return {
       monitor_id: monitor.id,
+      config_revision: configRevision,
       checked_at: checkedAt,
       ok: normalized.ok,
       effective_status: normalized.effective_status,
@@ -413,6 +430,7 @@ export async function checkWebsiteMonitorHttp(monitor: WebsiteProbeMonitor): Pro
       error: normalized.error,
     };
   } catch (error) {
+    if (error instanceof ScheduledBudgetExceeded) throw error;
     const normalized = normalizeWebsiteFetchResult({
       latencyMs: Date.now() - started,
       min: monitor.expected_status_min,
@@ -421,6 +439,7 @@ export async function checkWebsiteMonitorHttp(monitor: WebsiteProbeMonitor): Pro
     });
     return {
       monitor_id: monitor.id,
+      config_revision: configRevision,
       checked_at: checkedAt,
       ok: normalized.ok,
       effective_status: normalized.effective_status,
@@ -442,12 +461,12 @@ export function isWebsiteCheckDue(monitor: MaybeDueMonitor, now = new Date()): b
 }
 
 export function shouldNotifyWebsiteDown(monitor: MaybeAlertMonitor, now = new Date()): boolean {
-  if (monitor.status !== 'down' || monitor.last_notified_at || !monitor.down_since) return false;
+  if (!monitor.enabled || monitor.status !== 'down' || monitor.last_notified_at || !monitor.down_since) return false;
   return now.getTime() - new Date(monitor.down_since).getTime() >= monitor.grace_period_sec * 1000;
 }
 
-export function shouldNotifyWebsiteRecovery(monitor: { status: string; last_notified_at: string | null }): boolean {
-  return monitor.status === 'up' && Boolean(monitor.last_notified_at);
+export function shouldNotifyWebsiteRecovery(monitor: { enabled: boolean; status: string; last_notified_at: string | null }): boolean {
+  return monitor.enabled && monitor.status === 'up' && Boolean(monitor.last_notified_at);
 }
 
 export function buildWebsiteAlertMessage(input: {

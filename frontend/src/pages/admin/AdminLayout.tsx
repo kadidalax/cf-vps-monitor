@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Outlet, Link, useNavigate, useLocation } from "react-router-dom";
 import { Flex, Text, Button, IconButton } from "@radix-ui/themes";
 import { LogOut, Menu, X, Home, Github, Palette, Sun, Moon, Laptop } from "lucide-react";
@@ -21,8 +21,23 @@ export default function AdminLayout() {
   const location = useLocation();
   const githubUrl = CF_MONITOR_GITHUB_URL;
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [isMobile, setIsMobile] = useState(() => window.matchMedia('(max-width: 768px)').matches);
+  const sidebarRef = useRef<HTMLElement | null>(null);
+  const sidebarToggleRef = useRef<HTMLButtonElement | null>(null);
   const [version, setVersion] = useState("dev");
   const [hasUpdate, setHasUpdate] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState<string | null>(null);
+  const logoutPendingRef = useRef(false);
+  const closeSidebar = useCallback(() => {
+    if (!isMobile) return;
+    setSidebarOpen(false);
+    requestAnimationFrame(() => sidebarToggleRef.current?.focus());
+  }, [isMobile]);
+
+  useEffect(() => {
+    document.getElementById('cf-monitor-active-theme-css')?.remove();
+  }, []);
 
   useEffect(() => {
     if (!authLoading && !isAuthenticated) {
@@ -68,13 +83,46 @@ export default function AdminLayout() {
 
   // responsive sidebar
   useEffect(() => {
+    const media = window.matchMedia('(max-width: 768px)');
     const handleResize = () => {
-      setSidebarOpen(window.innerWidth >= 768);
+      setIsMobile(media.matches);
+      setSidebarOpen(!media.matches);
     };
     handleResize();
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
+    media.addEventListener('change', handleResize);
+    return () => media.removeEventListener('change', handleResize);
   }, []);
+
+  useEffect(() => {
+    if (authLoading || !isAuthenticated || !isMobile || !sidebarOpen) return;
+    const controls = () => Array.from(sidebarRef.current?.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), [tabindex="0"]') || [])
+      .filter(element => element.getClientRects().length > 0);
+    const frame = requestAnimationFrame(() => controls()[0]?.focus());
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeSidebar();
+      } else if (event.key === 'Tab') {
+        const items = controls();
+        const first = items[0];
+        const last = items[items.length - 1];
+        if (!first || !last) return;
+        if (!sidebarRef.current?.contains(document.activeElement) || (!event.shiftKey && document.activeElement === last)) {
+          event.preventDefault();
+          first.focus();
+        } else if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        }
+      }
+    };
+    document.addEventListener('keydown', handleKey);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener('keydown', handleKey);
+    };
+  }, [authLoading, closeSidebar, isAuthenticated, isMobile, sidebarOpen]);
 
   if (authLoading) {
     return (
@@ -86,11 +134,23 @@ export default function AdminLayout() {
 
   if (!isAuthenticated) return null;
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    if (logoutPendingRef.current) return;
+    logoutPendingRef.current = true;
+    setLoggingOut(true);
+    setLogoutError(null);
     const currentDisplayTheme = normalizeDisplayTheme(document.documentElement.getAttribute("data-monitor-theme") || displayTheme);
     setDisplayTheme(currentDisplayTheme);
-    logout();
-    navigate("/");
+    try {
+      await logout();
+      navigate("/login", { replace: true });
+    } catch (error) {
+      setLogoutError(`退出尚未确认，登录状态已保留。${error instanceof Error ? error.message : '网络错误'}。请重试退出。`);
+      closeSidebar();
+    } finally {
+      logoutPendingRef.current = false;
+      setLoggingOut(false);
+    }
   };
 
   const cycleTheme = () => {
@@ -117,14 +177,17 @@ export default function AdminLayout() {
   return (
     <Flex style={{ height: "100vh", overflow: "hidden" }}>
       {/* Mobile overlay */}
-      {sidebarOpen && window.innerWidth < 768 && (
-        <div className="mobile-sidebar-overlay" onClick={() => setSidebarOpen(false)} />
+      {sidebarOpen && isMobile && (
+        <div className="mobile-sidebar-overlay" onClick={closeSidebar} />
       )}
 
       {/* Mobile toggle button */}
       <IconButton
+        ref={sidebarToggleRef}
         className={`mobile-sidebar-toggle${sidebarOpen ? " is-open" : ""}`}
-        onClick={() => setSidebarOpen((v) => !v)}
+        onClick={() => sidebarOpen ? closeSidebar() : setSidebarOpen(true)}
+        aria-controls="admin-sidebar"
+        aria-expanded={sidebarOpen}
         aria-label={sidebarOpen ? "关闭菜单" : "打开菜单"}
         title={sidebarOpen ? "关闭菜单" : "打开菜单"}
       >
@@ -132,7 +195,13 @@ export default function AdminLayout() {
       </IconButton>
 
       {/* Sidebar */}
-      <aside className={`admin-sidebar ${sidebarOpen ? "open" : ""}`}>
+      <aside ref={sidebarRef} id="admin-sidebar" className={`admin-sidebar ${sidebarOpen ? "open" : ""}`}
+        {...(isMobile && !sidebarOpen ? { inert: '' } : {})}
+        aria-hidden={isMobile && !sidebarOpen || undefined}
+        role={isMobile ? 'dialog' : undefined}
+        aria-modal={isMobile && sidebarOpen || undefined}
+        aria-label={isMobile ? '管理菜单' : undefined}
+      >
         <Flex className="admin-sidebar-header" align="center" justify="between">
           <Flex direction="column" gap="1" style={{ minWidth: 0 }}>
             <Text size="4" weight="bold" style={{ color: "var(--accent-11)", lineHeight: 1.15 }}>
@@ -140,8 +209,8 @@ export default function AdminLayout() {
             </Text>
             <Text size="1" color="gray">管理后台</Text>
           </Flex>
-          {window.innerWidth < 768 && (
-            <IconButton variant="ghost" size="1" onClick={() => setSidebarOpen(false)} aria-label="关闭菜单">
+          {isMobile && (
+            <IconButton variant="ghost" size="1" onClick={closeSidebar} aria-label="关闭菜单">
               <X size={16} />
             </IconButton>
           )}
@@ -159,6 +228,7 @@ export default function AdminLayout() {
                   href={item.path}
                   target="_blank"
                   rel="noopener noreferrer"
+                  onClick={closeSidebar}
                   style={{ textDecoration: "none" }}
                 >
                   <Flex
@@ -186,7 +256,7 @@ export default function AdminLayout() {
             }
 
             return (
-              <Link key={item.path} to={item.path} style={{ textDecoration: "none" }}>
+              <Link key={item.path} to={item.path} style={{ textDecoration: "none" }} onClick={closeSidebar}>
                 <Flex
                   align="center"
                   gap="3"
@@ -203,9 +273,6 @@ export default function AdminLayout() {
                     minHeight: 40,
                     margin: "3px 8px",
                   }}
-                  onClick={() => {
-                    if (window.innerWidth < 768) setSidebarOpen(false);
-                  }}
                 >
                   {item.icon}
                   <Text size="2">{item.label}</Text>
@@ -220,15 +287,15 @@ export default function AdminLayout() {
             <Button className="admin-sidebar-action" variant="soft" size="2" onClick={openPublicSite} style={{ width: "100%" }}>
               <Home size={14} /> 返回前台
             </Button>
-            <Button className="admin-sidebar-action" variant="soft" size="2" onClick={handleLogout} color="red" style={{ width: "100%" }}>
-              <LogOut size={14} /> 退出登录
+            <Button className="admin-sidebar-action" variant="soft" size="2" onClick={() => void handleLogout()} disabled={loggingOut} color="red" style={{ width: "100%" }}>
+              <LogOut size={14} /> {loggingOut ? '退出中…' : '退出登录'}
             </Button>
           </Flex>
           <Flex px="4" pb="2" justify="center">
             <Button
               variant="ghost"
               size="1"
-              onClick={() => navigate("/admin/about")}
+              onClick={() => { closeSidebar(); navigate("/admin/about"); }}
               style={{ maxWidth: "100%", padding: "2px 6px" }}
             >
               <Text size="1" color={hasUpdate ? "orange" : "gray"}>
@@ -239,7 +306,7 @@ export default function AdminLayout() {
         </div>
       </aside>
 
-      <main className="admin-main" style={{ flex: 1, minWidth: 0, padding: "8px 16px 16px", overflowY: "auto" }}>
+      <main className="admin-main" {...(isMobile && sidebarOpen ? { inert: '' } : {})} style={{ flex: 1, minWidth: 0, padding: "8px 16px 16px", overflowY: "auto" }}>
         <div className="admin-main-content" style={{ maxWidth: 1400, margin: "0 auto", width: "100%" }}>
           <div className="admin-top-actions" aria-label="后台快捷操作">
             <IconButton
@@ -284,6 +351,10 @@ export default function AdminLayout() {
               <Home size={18} />
             </IconButton>
           </div>
+          {logoutError && <Flex role="alert" direction="column" gap="2" mb="3" style={{ paddingTop: 44 }}>
+            <Text size="2" color="red">{logoutError}</Text>
+            <Button variant="soft" color="red" disabled={loggingOut} onClick={() => void handleLogout()} style={{ alignSelf: 'flex-start' }}>重试退出</Button>
+          </Flex>}
           <Outlet />
         </div>
       </main>

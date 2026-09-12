@@ -16,7 +16,6 @@ const loadLogin = () => import('./pages/Login');
 const loadDbInit = () => import('./pages/DbInit');
 const loadNotFound = () => import('./pages/NotFound');
 const loadAdminDashboard = () => import('./pages/admin/Dashboard');
-const loadAdminClients = () => import('./pages/admin/Clients');
 const loadSettingsLayout = () => import('./pages/admin/SettingsLayout');
 const loadSettingsSite = () => import('./pages/admin/SettingsSite');
 const loadSettingsGeneral = () => import('./pages/admin/SettingsGeneral');
@@ -30,7 +29,6 @@ const NotFound = lazy(loadNotFound);
 
 const AdminLayout = lazy(() => import('./pages/admin/AdminLayout'));
 const AdminDashboard = lazy(loadAdminDashboard);
-const AdminClients = lazy(loadAdminClients);
 const AdminWebsites = lazy(() => import('./pages/admin/Websites'));
 const SettingsLayout = lazy(loadSettingsLayout);
 const SettingsSite = lazy(loadSettingsSite);
@@ -52,7 +50,6 @@ function preloadRouteChunks() {
   void loadNotFound();
   void import('./pages/admin/AdminLayout');
   void loadAdminDashboard();
-  void loadAdminClients();
   void import('./pages/admin/Websites');
   void loadSettingsLayout();
   void loadSettingsSite();
@@ -134,7 +131,7 @@ export default function App() {
 
                 <Route path="/admin" element={<AdminLayout />}>
                   <Route index element={<LiveDataRoute><AdminDashboard /></LiveDataRoute>} />
-                  <Route path="clients" element={<AdminClients />} />
+                  <Route path="clients" element={<Navigate to="/admin" replace />} />
                   <Route path="websites" element={<AdminWebsites />} />
                   <Route path="settings" element={<SettingsLayout />}>
                     <Route index element={<SettingsSite />} />

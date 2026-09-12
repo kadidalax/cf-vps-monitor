@@ -11,8 +11,9 @@ import {
   Server,
   Wifi,
 } from 'lucide-react';
-import { formatBytes } from '../utils/format';
 import { formatCpuSpec } from '../utils/cpuFormat';
+import type { LiveRecord } from '../types';
+import { diskUsagePresentation, formatMetricBytes, resourceTotal } from '../utils/nodeMetrics';
 
 interface DetailsGridProps {
   client: {
@@ -37,7 +38,7 @@ interface DetailsGridProps {
     remark?: string;
     version?: string;
   };
-  live?: unknown;
+  live?: Partial<LiveRecord>;
   box?: boolean;
   align?: 'left' | 'center' | 'right';
   uuid?: string;
@@ -117,10 +118,11 @@ function DetailRemarkItem({ value }: { value: string }) {
   );
 }
 
-export default function DetailsGrid({ client, box, align, compact, remark }: DetailsGridProps) {
+export default function DetailsGrid({ client, live, box, align, compact, remark }: DetailsGridProps) {
   const Container: any = box ? Card : 'div';
   const ipValue = `IPv4 ${formatSupport(client.has_ipv4, client.ipv4)} / IPv6 ${formatSupport(client.has_ipv6, client.ipv6)}`;
   const normalizedRemark = remark?.trim();
+  const disk = diskUsagePresentation(live, client.disk_total);
   const agentItem = {
     label: 'Agent',
     value: client.version || '-',
@@ -160,17 +162,17 @@ export default function DetailsGrid({ client, box, align, compact, remark }: Det
     },
     {
       label: '内存容量',
-      value: formatBytes(client.mem_total || 0),
+      value: formatMetricBytes(resourceTotal(live?.ram_total, client.mem_total)),
       icon: <Server size={16} />,
     },
     {
       label: '交换空间',
-      value: formatBytes(client.swap_total || 0),
+      value: formatMetricBytes(live?.swap_total ?? client.swap_total),
       icon: <HardDrive size={16} />,
     },
     {
       label: '磁盘容量',
-      value: formatBytes(client.disk_total || 0),
+      value: formatMetricBytes(resourceTotal(live?.disk_total, client.disk_total)),
       icon: <HardDrive size={16} />,
     },
     {
@@ -184,6 +186,7 @@ export default function DetailsGrid({ client, box, align, compact, remark }: Det
       icon: <Globe size={16} />,
     },
     agentItem,
+    ...(disk.estimated ? [{ label: '磁盘占用（估算）', value: disk.detail, icon: <HardDrive size={16} /> }] : []),
   ];
   const firstRowItems = normalizedRemark ? items.slice(0, 5) : [];
   const resourceRowItems = normalizedRemark ? items.slice(5, 10) : [];
@@ -217,6 +220,7 @@ export default function DetailsGrid({ client, box, align, compact, remark }: Det
           ))}
         </div>
       )}
+      {disk.estimated && <Text as="p" size="1" color="gray" mt="2">{disk.description} {disk.sampleLabel}</Text>}
     </Container>
   );
 }

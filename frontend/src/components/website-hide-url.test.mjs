@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { productionDeclaration } from '../../test/helpers/production-module.mjs';
 
 const list = await readFile(new URL('./WebsiteMonitorList.tsx', import.meta.url), 'utf8');
 const details = await readFile(new URL('./WebsiteMonitorDetails.tsx', import.meta.url), 'utf8');
@@ -8,8 +9,11 @@ const adminWebsites = await readFile(new URL('../pages/admin/Websites.tsx', impo
 
 // --- 类型：url 必须可为 null，否则下游会用空串兜底而绕过判断 ---
 assert.match(list, /url: string \| null;/, 'WebsiteMonitorSummary.url 必须是 string | null');
-assert.match(index, /url: value\.url == null \? null : String\(value\.url\)/,
-  '归一化不得把 null 兜底成空串以外的值——必须原样保留 null');
+const normalizeWebsiteSummary = productionDeclaration('src/pages/Index.tsx', 'normalizeWebsiteSummary', {
+  readWebsiteHidden: productionDeclaration('src/pages/Index.tsx', 'readWebsiteHidden'),
+});
+assert.equal(normalizeWebsiteSummary({ id: 1, url: null }).url, null,
+  '归一化必须保留公开 API 的 null 网址');
 
 // --- 回归锁：地址隐藏时不得渲染任何链接元素 ---
 const listHrefCount = (list.match(/href=\{monitor\.url\}/g) || []).length;

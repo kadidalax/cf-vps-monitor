@@ -1,4 +1,5 @@
-import type { LiveDataResponse } from '../contexts/LiveDataContext';
+import type { LastKnownRecord, LiveDataResponse } from '../contexts/LiveDataContext';
+import { diskMeasurementMetadata } from './diskMeasurement.ts';
 
 export type ViewerTokenResponse = {
   token: string;
@@ -16,7 +17,36 @@ function asFiniteNumber(value: unknown): number | null {
 }
 
 export function emptyLiveDataResponse(now = Date.now()): LiveDataResponse {
-  return { online: [], clients: [], data: {}, count: 0, timestamp: now };
+  return { online: [], clients: [], data: {}, last_known: {}, count: 0, timestamp: now };
+}
+
+const lastKnownMetrics = ['cpu', 'gpu', 'ram', 'ram_total', 'swap', 'swap_total', 'disk', 'disk_total',
+  'net_in', 'net_out', 'net_total_up', 'net_total_down', 'load', 'temp', 'uptime', 'process_count', 'connections', 'connections_udp'] as const;
+const nullableMetrics = new Set<string>(['disk', 'disk_total', 'load', 'temp', 'uptime']);
+
+export function normalizeLastKnownRecord(payload: unknown, uuid: string): LastKnownRecord | null {
+  const record = asRecord(payload);
+  if (!record || record.uuid !== uuid || !uuid.trim() || typeof record.name !== 'string') return null;
+  const lastReportTime = asFiniteNumber(record.lastReportTime);
+  if (lastReportTime === null || lastReportTime < 0) return null;
+  const result: LastKnownRecord = { uuid, name: record.name, lastReportTime };
+  for (const key of lastKnownMetrics) {
+    const value = record[key];
+    if ((value === null && nullableMetrics.has(key)) || asFiniteNumber(value) !== null) {
+      (result as Record<string, unknown>)[key] = value;
+    }
+  }
+  const diskSource = diskMeasurementMetadata(record);
+  if (diskSource.valid) {
+    result.disk_source = 'directory';
+    result.disk_sampled_at = diskSource.sampledAt;
+  } else if (diskSource.attempted) {
+    result.disk = null;
+  }
+  if (typeof record.message === 'string') result.message = record.message;
+  const order = asFiniteNumber(record.sort_order);
+  if (order !== null) result.sort_order = order;
+  return result;
 }
 
 export function normalizeLiveDataResponse(payload: unknown): LiveDataResponse | null {
@@ -36,6 +66,11 @@ export function normalizeLiveDataResponse(payload: unknown): LiveDataResponse | 
       }) as LiveDataResponse['clients']
     : [];
   const data = asRecord(record.data);
+  const online = record.online;
+  const lastKnown = Object.fromEntries(Object.entries(asRecord(record.last_known) || {}).flatMap(([uuid, value]) => {
+    const item = normalizeLastKnownRecord(value, uuid);
+    return item && !online.includes(uuid) ? [[uuid, item]] : [];
+  }));
   const metadataVersion = typeof record.metadata_version === 'string' && record.metadata_version.trim() !== ''
     ? record.metadata_version
     : undefined;
@@ -43,6 +78,7 @@ export function normalizeLiveDataResponse(payload: unknown): LiveDataResponse | 
     online: record.online,
     clients,
     data: data as LiveDataResponse['data'] || {},
+    last_known: lastKnown,
     count: Math.floor(count),
     timestamp: asFiniteNumber(record.timestamp) ?? Date.now(),
     ...(metadataVersion ? { metadata_version: metadataVersion } : {}),

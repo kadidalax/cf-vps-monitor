@@ -12,10 +12,13 @@
     "lint": "npm --prefix frontend run lint && npm --prefix worker run lint",
     "build:migrations": "node scripts/generate-migrations.mjs",
     "build": "npm --prefix frontend run build && npm --prefix worker run build",
-    "test": "cd agent && go test ./...",
-    "verify": "npm run lint && npm run build && npm test",
+    "test:js": "node --test",
+    "test:go": "cd agent && go test ./...",
+    "test": "npm run test:js && npm run test:go",
+    "security:check": "node scripts/security-check.mjs",
+    "verify": "npm run lint && npm run build && npm test && npm run security:check",
     "verify:cloudflare": "node scripts/deploy-cloudflare.mjs --dry-run --outdir worker/.tmp/wrangler-dry-run --metafile worker/.tmp/wrangler-dry-run/metafile.json",
-    "deploy": "npm run build && node scripts/deploy-cloudflare.mjs",
+    "deploy": "node scripts/deploy-cloudflare.mjs",
     "dev:worker": "npm --prefix worker run dev",
     "dev:frontend": "npm --prefix frontend run dev"
   },
@@ -30,6 +33,17 @@
       "JWT_SECRET": {
         "description": "后台登录会话签名密钥。建议使用至少 32 个字符的随机字符串。"
       }
+    }
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
+    "esbuild": "0.28.1",
+    "miniflare": "4.20260730.0"
+  },
+  "overrides": {
+    "miniflare": {
+      "sharp": "0.35.4",
+      "undici": "7.29.0"
     }
   }
 }

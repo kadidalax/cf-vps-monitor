@@ -14,7 +14,9 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 - **通知**：支持 Telegram 、 SMTP Email 和 Webhook，可配置离线、到期、负载以及网站监控相关通知。
 - **主题**：内置 `monitor` 和 `aurora` 主题，支持主题包、自定义 CSS、图片和字体资源。
 - **管理员恢复**：首次登录时创建管理员；忘记账号或密码时，可在登录页用当前部署的 Supabase Secret key 重置唯一管理员。
-- **省配额策略**：有实时观看者时 Agent 约 3 秒采集并上报；无人查看时约 120 秒采样并批量上报，足可监控50台服务器。
+- **省配额策略**：有实时观看者时 Agent 约 3 秒采集并上报；无人查看时约 120 秒采样并批量上报。可用节点数取决于 Ping 任务、访问量、上报方式以及数据库和实时服务的独立额度，请在后台容量估算中核对，不能仅凭 Worker 请求量保证免费运行 50 台。
+
+节点温度目前仅支持 Linux 上可识别的 CPU/SoC 传感器，多个有效读数取最高值。没有传感器或读取失败，以及当前 Windows、macOS、FreeBSD 安装包，均显示“不可用”；真实 0°C 和负温度仍是有效读数。GPU 温度独立显示。旧 Agent 需要升级才能使用这一规则，旧历史中的 0 不会被猜测改写。
 
 ## 预览图
 
@@ -44,6 +46,8 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 `SUPABASE_SERVICE_ROLE_KEY` 仅作为旧部署兼容变量保留；新部署请使用 `SUPABASE_SECRET_KEY`。
 
 ## 面板部署
+
+在 Cloudflare 的 **Settings → Build → Build Variables and Secrets** 中设置 `NODE_VERSION=24`、`GO_VERSION=1.26.8`（与 `agent/go.mod` 保持一致）。Workers Builds 官方镜像已包含 Go，也能按 `go.mod` 自动选择工具链。部署入口会先运行前后端检查、构建和 JavaScript/Go 测试；检查失败时不会发布。
 
 ### Fork 原仓库部署【推荐，方便更新】
 
@@ -80,7 +84,7 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 
 ## 命令行部署
 
-适合本地开发或维护者。
+适合本地开发或维护者。需要 Node.js 24 和 Go；Go 会依据 `agent/go.mod` 自动选择所需工具链。
 
 ```powershell
 npm ci
@@ -107,7 +111,21 @@ npm run deploy
 
 同一台服务器可以安装多个 Agent 实例。每个安装命令会带独立 `instance-id`，默认生成独立服务名和安装目录。
 
-Unix 安装命令会自动判断 Linux、Alpine/OpenRC、macOS、FreeBSD，以及 root/非 root 环境。非 root 或 Serv00 这类共享主机会安装到用户目录，并使用 `nohup` + `crontab @reboot` 尝试保持后台运行。
+Unix 安装命令会自动判断 Linux、Alpine/OpenRC、macOS、FreeBSD，以及 root/非 root 环境。Linux 只有在 systemd 或 OpenRC 实际运行时才使用对应系统服务；没有可用服务管理器的容器会自动使用用户模式。也可加 `--install-mode user` 明确选择用户模式。
+
+| 系统 | 预编译架构 | 系统安装 | 普通用户安装 |
+| --- | --- | --- | --- |
+| Debian/Ubuntu、RHEL 系等 Linux | amd64、arm64 | 活动 systemd | 支持 |
+| Alpine/Gentoo 等 OpenRC Linux | amd64、arm64 | 活动 OpenRC | 支持 |
+| macOS | Intel、Apple Silicon | LaunchDaemon | 支持 |
+| FreeBSD | amd64 | 使用用户模式 | 支持 |
+| Windows | x64 | 需要管理员，服务任务以 LocalService 运行 | 当前不支持非管理员安装 |
+
+该表说明安装路径和发行包范围，不代表每个发行版、架构都经过实机验证。其他架构需要自行提供适配二进制或编译环境；未运行 systemd/OpenRC 的 Linux 不提供原生 SysV/runit 服务接入。
+
+非 root 或 Serv00 这类共享主机会把程序、配置和日志保存在用户目录，用 `nohup` 启动后台进程。主机允许时会添加 `crontab @reboot`；缺少 crontab 或账号无权读写时，Agent 继续运行并明确提示未配置开机自启，不覆盖原有任务。`nohup` 不提供崩溃重启，开机自启还取决于主机是否启用 cron、是否允许常驻进程。
+
+OpenRC 每次启动会准备服务账户专用日志并检查启动后进程存活，日志保留已有内容。系统服务的自定义安装路径必须允许服务账户进入；安装器不会放宽既有私有父目录权限。ICMP 与部分硬件指标取决于系统权限，不应把这些限制误当成 TCP/HTTP 或普通指标上报失败。
 
 卸载单个 Unix 实例：
 
@@ -126,6 +144,12 @@ wget -qO- 'https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/refs/heads
 ## 后台一键同步更新
 
 后台固定检测 [kadidalax/cf-vps-monitor](https://github.com/kadidalax/cf-vps-monitor) `main` 分支的最新推送编码。进入后台 `关于 -> 版本更新`，保存“你的部署仓库地址”，以后检测到推送编码不一致时会显示同步入口。
+
+### 从 v2.0.2 升级到 v2.0.3
+
+1. 部署完成后，立即打开本站 `/db-init` 执行一次数据库升级。已有账号、节点及有效监控数据保留，无需清库或重建节点；网站图表会从升级后的新采样重新积累。
+2. 原先使用非每月 1 日重置流量的节点，先在后台确认“流量重置日”，再更新 Agent。使用后台为原节点生成的新版安装命令原地更新即可，安装器会重启 Agent，无需重启 VPS。Agent 不会自动更新；由 Agent 执行的网站探测需要新版，旧版仍可上报普通指标和 Ping。
+3. 首次升级 Agent 会重建流量统计基线，累计值可能降低或重新起算；修改流量重置日也会重建当期累计。
 
 ### 如果是 Fork 原仓库部署【推荐】
 

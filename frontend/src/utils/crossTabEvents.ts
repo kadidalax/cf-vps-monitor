@@ -13,10 +13,16 @@
  * 接收仍监听两条以防某条被浏览器扩展拦截，并按消息 id 去重兜底。
  */
 
-type CrossTabEnvelope = { type: string; id: string; at: number; detail?: unknown };
+type CrossTabEnvelope = { type: string; id: string; at: number; source?: string; detail?: unknown };
 
 const SEEN_TTL_MS = 15_000;
-const seenIds = new Map<string, number>();
+const sourceId = newId();
+type EventSubscription = {
+  callbacks: Set<(detail?: unknown) => void>;
+  channel: BroadcastChannel | null;
+  close: () => void;
+};
+const subscriptions = new Map<string, EventSubscription>();
 
 function hasBroadcastChannel(): boolean {
   return typeof BroadcastChannel !== 'undefined';
@@ -29,7 +35,7 @@ function newId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function alreadyHandled(id: unknown): boolean {
+function alreadyHandled(id: unknown, seenIds: Map<string, number>): boolean {
   if (typeof id !== 'string' || !id) return false;
   const now = Date.now();
   for (const [key, at] of seenIds) {
@@ -43,20 +49,22 @@ function alreadyHandled(id: unknown): boolean {
 /** 同标签页派发 CustomEvent，并向其他标签页广播一次（且仅一次）。 */
 export function broadcastCrossTab(eventName: string, detail?: unknown): void {
   if (typeof window === 'undefined') return;
-  const envelope: CrossTabEnvelope = { type: eventName, id: newId(), at: Date.now(), detail };
+  const envelope: CrossTabEnvelope = { type: eventName, id: newId(), at: Date.now(), source: sourceId, detail };
 
   window.dispatchEvent(new CustomEvent(eventName, { detail }));
 
   if (hasBroadcastChannel()) {
     try {
-      const channel = new BroadcastChannel(eventName);
+      const sharedChannel = subscriptions.get(eventName)?.channel;
+      const channel = sharedChannel || new BroadcastChannel(eventName);
       channel.postMessage(envelope);
-      channel.close();
+      if (!sharedChannel) channel.close();
       return;
     } catch { /* 落到 localStorage 兜底 */ }
   }
   try {
     localStorage.setItem(eventName, JSON.stringify(envelope));
+    localStorage.removeItem(eventName);
   } catch { /* 隐私模式下可能不可写；此时仅同标签页生效 */ }
 }
 
@@ -69,41 +77,52 @@ export function subscribeCrossTab(
   callback: (detail?: unknown) => void,
 ): () => void {
   if (typeof window === 'undefined') return () => {};
-
-  const onLocalEvent = (event: Event) => {
-    callback(event instanceof CustomEvent ? event.detail : undefined);
-  };
-  const onStorage = (event: StorageEvent) => {
-    if (event.key !== eventName) return;
-    if (!event.newValue) { callback(undefined); return; }
-    try {
-      const parsed = JSON.parse(event.newValue) as Partial<CrossTabEnvelope>;
-      if (alreadyHandled(parsed?.id)) return;
-      callback(parsed?.detail);
-    } catch {
-      callback(undefined);
+  let subscription = subscriptions.get(eventName);
+  if (!subscription) {
+    const callbacks = new Set<(detail?: unknown) => void>();
+    const seenIds = new Map<string, number>();
+    const deliver = (detail?: unknown) => {
+      for (const listener of [...callbacks]) listener(detail);
+    };
+    const receive = (data: Partial<CrossTabEnvelope> | undefined) => {
+      if (data?.type !== eventName || data.source === sourceId) return;
+      if (alreadyHandled(data.id, seenIds)) return;
+      deliver(data.detail);
+    };
+    const onLocalEvent = (event: Event) => deliver(event instanceof CustomEvent ? event.detail : undefined);
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== eventName) return;
+      if (!event.newValue) return;
+      try { receive(JSON.parse(event.newValue) as Partial<CrossTabEnvelope>); }
+      catch { deliver(undefined); }
+    };
+    let channel: BroadcastChannel | null = null;
+    if (hasBroadcastChannel()) {
+      try {
+        channel = new BroadcastChannel(eventName);
+        channel.onmessage = (event: MessageEvent) => receive(event.data as Partial<CrossTabEnvelope> | undefined);
+      } catch { /* 不可用时仅靠 storage 事件 */ }
     }
-  };
-
-  let channel: BroadcastChannel | null = null;
-  if (hasBroadcastChannel()) {
-    try {
-      channel = new BroadcastChannel(eventName);
-      channel.onmessage = (event: MessageEvent) => {
-        const data = event.data as Partial<CrossTabEnvelope> | undefined;
-        if (data?.type !== eventName) return;
-        if (alreadyHandled(data?.id)) return;
-        callback(data?.detail);
-      };
-    } catch { /* 不可用时仅靠 storage 事件 */ }
+    window.addEventListener(eventName, onLocalEvent);
+    window.addEventListener('storage', onStorage);
+    subscription = {
+      callbacks,
+      channel,
+      close: () => {
+        window.removeEventListener(eventName, onLocalEvent);
+        window.removeEventListener('storage', onStorage);
+        channel?.close();
+      },
+    };
+    subscriptions.set(eventName, subscription);
   }
-
-  window.addEventListener(eventName, onLocalEvent);
-  window.addEventListener('storage', onStorage);
-
+  subscription.callbacks.add(callback);
+  const activeSubscription = subscription;
   return () => {
-    window.removeEventListener(eventName, onLocalEvent);
-    window.removeEventListener('storage', onStorage);
-    channel?.close();
+    activeSubscription.callbacks.delete(callback);
+    if (activeSubscription.callbacks.size === 0 && subscriptions.get(eventName) === activeSubscription) {
+      activeSubscription.close();
+      subscriptions.delete(eventName);
+    }
   };
 }

@@ -15,10 +15,14 @@ permissions:
 
 concurrency:
   group: agent-release
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
   release-agent:
+    needs: verify
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -30,11 +34,43 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
           go-version-file: agent/go.mod
           cache-dependency-path: agent/go.sum
+
+      - name: Validate immutable release version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          AGENT_VERSION_TAG_PATH="$(node ../scripts/verify-release-assets.mjs --version-path "$AGENT_VERSION")"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          if git ls-remote --exit-code --tags origin "refs/tags/${AGENT_VERSION}" >/dev/null; then
+            echo "Version ${AGENT_VERSION} already has a tag. Choose a new version; existing assets are immutable." >&2
+            exit 1
+          else
+            tag_status=$?
+            if [ "$tag_status" -ne 2 ]; then exit "$tag_status"; fi
+          fi
+          # List succeeds even when the version does not exist, and fails closed
+          # on authentication/network errors. Draft releases count as used too.
+          existing_releases="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq '.[].tag_name')"
+          while IFS= read -r release_tag; do
+            if [ "$release_tag" = "$AGENT_VERSION" ]; then
+              echo "Version ${AGENT_VERSION} already has a release. Choose a new version." >&2
+              exit 1
+            fi
+          done <<< "$existing_releases"
+          echo "AGENT_VERSION_TAG=${AGENT_VERSION}" >> "$GITHUB_ENV"
+          echo "AGENT_VERSION_TAG_PATH=${AGENT_VERSION_TAG_PATH}" >> "$GITHUB_ENV"
 
       - name: Build agent binaries
         shell: bash
@@ -43,10 +79,7 @@ jobs:
           rm -rf dist
           mkdir -p dist
           agent_version="${AGENT_VERSION}"
-          if [[ ! "$agent_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.+][A-Za-z0-9][A-Za-z0-9.-]*)?$ ]]; then
-            echo "Invalid version: ${agent_version}" >&2
-            exit 1
-          fi
+          node ../scripts/verify-release-assets.mjs --version-path "$agent_version" >/dev/null
           echo "AGENT_VERSION=${agent_version}" >> "$GITHUB_ENV"
           echo "AGENT_VERSION_TAG=${agent_version}" >> "$GITHUB_ENV"
           ldflags="-s -w -X main.Version=${agent_version}"
@@ -82,12 +115,8 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git ls-remote --exit-code --tags origin "refs/tags/${AGENT_VERSION_TAG}" >/dev/null 2>&1; then
-            echo "Immutable release tag ${AGENT_VERSION_TAG} already exists."
-          else
-            git tag "$AGENT_VERSION_TAG" "$GITHUB_SHA"
-            git push origin "refs/tags/${AGENT_VERSION_TAG}"
-          fi
+          git tag "$AGENT_VERSION_TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/${AGENT_VERSION_TAG}"
 
       - name: Publish immutable agent release
         env:
@@ -95,22 +124,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          release_notes="Immutable release for ${GITHUB_REPOSITORY}@${GITHUB_SHA}. Artifacts include GitHub artifact attestations."
-
-          if gh release view "$AGENT_VERSION_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release edit "$AGENT_VERSION_TAG" \
-              --title "CF VPS Monitor Agent ${AGENT_VERSION}" \
-              --notes "$release_notes" \
-              --repo "$GITHUB_REPOSITORY"
-          else
-            gh release create "$AGENT_VERSION_TAG" \
-              --verify-tag \
-              --title "CF VPS Monitor Agent ${AGENT_VERSION}" \
-              --notes "$release_notes" \
-              --repo "$GITHUB_REPOSITORY"
-          fi
-
-          gh release upload "$AGENT_VERSION_TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          tag_ref="$(git ls-remote --exit-code --tags origin "refs/tags/${AGENT_VERSION_TAG}")"
+          test "${tag_ref%%[[:space:]]*}" = "$GITHUB_SHA"
+          release_notes="${RUNNER_TEMP}/agent-release-notes.txt"
+          release_metadata="${RUNNER_TEMP}/agent-release-metadata.json"
+          printf 'Immutable release for %s@%s.\nArtifacts include GitHub artifact attestations.\n' "$GITHUB_REPOSITORY" "$GITHUB_SHA" > "$release_notes"
+          gh release create "$AGENT_VERSION_TAG" \
+            --verify-tag --target "$GITHUB_SHA" --draft \
+            --title "CF VPS Monitor Agent ${AGENT_VERSION}" \
+            --notes-file "$release_notes" --repo "$GITHUB_REPOSITORY"
+          gh release upload "$AGENT_VERSION_TAG" dist/* --repo "$GITHUB_REPOSITORY"
+          # The tag endpoint returns published releases. Resolve this draft's ID
+          # through the CLI, then read its assets without publishing it early.
+          release_id="$(gh release view "$AGENT_VERSION_TAG" --repo "$GITHUB_REPOSITORY" --json databaseId --jq .databaseId)"
+          case "$release_id" in ''|*[!0-9]*) echo "Invalid draft release ID" >&2; exit 1 ;; esac
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "$release_metadata"
+          node ../scripts/verify-release-assets.mjs "$AGENT_VERSION_TAG" "$GITHUB_SHA" dist "$release_metadata"
+          gh release edit "$AGENT_VERSION_TAG" --draft=false --repo "$GITHUB_REPOSITORY"
 
       - name: Verify published releases
         env:

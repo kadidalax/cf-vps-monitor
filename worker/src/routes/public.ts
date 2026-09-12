@@ -33,10 +33,6 @@ import { base64ToBytes } from '../utils/theme-package';
 
 const publicRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 type PublicContext = Context<{ Bindings: Bindings; Variables: Variables }>;
-const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
-const LOGIN_RATE_LIMIT_MAX_FAILURES = 5;
-const LOGIN_RATE_LIMIT_BASE_LOCK_MS = 30 * 1000;
-const LOGIN_RATE_LIMIT_MAX_LOCK_MS = 15 * 60 * 1000;
 const LOGIN_RATE_LIMIT_CLEANUP_AGE_MS = 24 * 60 * 60 * 1000;
 const LOGIN_RATE_LIMIT_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 const LOGIN_FAILURE_AUDIT_THROTTLE_MS = 60 * 1000;
@@ -530,7 +526,7 @@ async function readAdminClientsSnapshotOverlay(c: PublicContext): Promise<AdminC
 }
 
 function applyPublicClientsOverlay(clients: PublicClient[], overlay: AdminClientsSnapshotOverlay | null, includeHidden = false): PublicClient[] {
-  if (!overlay) return clients;
+  if (!overlay) return clients.filter(client => includeHidden || !client.hidden);
   const removed = new Set(overlay.removed);
   const byUuid = new Map(
     clients
@@ -539,18 +535,16 @@ function applyPublicClientsOverlay(clients: PublicClient[], overlay: AdminClient
   );
   for (const raw of overlay.clients) {
     const client = toPublicClient(raw as Parameters<typeof toPublicClient>[0]);
-    if (!client.uuid || (!includeHidden && client.hidden) || removed.has(client.uuid)) continue;
+    if (!client.uuid || removed.has(client.uuid)) continue;
     const existing = byUuid.get(client.uuid);
+    const existingUpdatedAt = Date.parse(existing?.updated_at || '');
+    const overlayUpdatedAt = Date.parse(client.updated_at || '');
+    if (Number.isFinite(existingUpdatedAt)
+      && (!Number.isFinite(overlayUpdatedAt) || overlayUpdatedAt < existingUpdatedAt)) continue;
     const next = { ...existing, ...client };
-    if (existing) {
-      if (client.price === 0 && existing.price !== 0) next.price = existing.price;
-      if (client.billing_cycle === 0 && existing.billing_cycle !== 0) next.billing_cycle = existing.billing_cycle;
-      if (!client.currency && existing.currency) next.currency = existing.currency;
-      if (!client.expired_at && existing.expired_at) next.expired_at = existing.expired_at;
-    }
     byUuid.set(client.uuid, next);
   }
-  return [...byUuid.values()];
+  return [...byUuid.values()].filter(client => includeHidden || !client.hidden);
 }
 
 async function getPublicClientsSnapshot(c: PublicContext, database: db.QueryDatabase, force = false, includeHidden = false): Promise<PublicClientsSnapshot> {
@@ -558,9 +552,7 @@ async function getPublicClientsSnapshot(c: PublicContext, database: db.QueryData
   if (!includeHidden && !force && cacheIsFresh(publicClientsSnapshotCache, now)) return publicClientsSnapshotCache!;
 
   const clients = await db.listPublicClientRows(database, force);
-  let publicClients = clients
-    .filter(client => includeHidden || !client.hidden)
-    .map(toPublicClient);
+  let publicClients = clients.map(toPublicClient);
   publicClients = applyPublicClientsOverlay(publicClients, await readAdminClientsSnapshotOverlay(c), includeHidden);
   const publicClientIds = new Set(publicClients.map(client => client.uuid));
   const nodes = publicClients.map((client) => ({
@@ -568,8 +560,9 @@ async function getPublicClientsSnapshot(c: PublicContext, database: db.QueryData
     tags: client.tags ? client.tags.split(';').filter(Boolean) : [],
   }));
   const expiresAt = now + PUBLIC_METADATA_CACHE_MS;
+  const visiblePublicClientIds = new Set(publicClients.filter(client => !client.hidden).map(client => client.uuid));
   for (const client of clients) {
-    publicClientVisibilityCache.set(client.uuid, { value: !client.hidden, expiresAt });
+    publicClientVisibilityCache.set(client.uuid, { value: visiblePublicClientIds.has(client.uuid), expiresAt });
   }
   const snapshot = {
     clients: publicClients,
@@ -845,40 +838,22 @@ export async function recordLoginFailure(
   database: db.QueryDatabase,
   buckets: string[],
   nowMs: number,
-  states?: LoginRateLimitStateByBucket,
+  _states?: LoginRateLimitStateByBucket,
 ): Promise<void> {
-  const nowIso = new Date(nowMs).toISOString();
-  const rateLimitStates = states || await loadLoginRateLimitStates(database, buckets);
-  const nextStates: db.LoginRateLimit[] = [];
-  for (const bucket of buckets) {
-    const state = rateLimitStates.has(bucket) ? rateLimitStates.get(bucket) : await db.getLoginRateLimit(database, bucket);
-    const firstFailedMs = parseTimeMs(state?.first_failed_at);
-    const inWindow = Boolean(state) && nowMs - firstFailedMs <= LOGIN_RATE_LIMIT_WINDOW_MS;
-    const failures = inWindow ? Number(state?.failures || 0) + 1 : 1;
-    const firstFailedAt = inWindow ? state!.first_failed_at : nowIso;
-    const shouldLock = failures >= LOGIN_RATE_LIMIT_MAX_FAILURES;
-    const lockMs = shouldLock
-      ? Math.min(
-        LOGIN_RATE_LIMIT_BASE_LOCK_MS * (2 ** (failures - LOGIN_RATE_LIMIT_MAX_FAILURES)),
-        LOGIN_RATE_LIMIT_MAX_LOCK_MS,
-      )
-      : 0;
-
-    const nextState = {
-      bucket,
-      failures,
-      first_failed_at: firstFailedAt,
-      last_failed_at: nowIso,
-      locked_until: shouldLock ? new Date(nowMs + lockMs).toISOString() : null,
-    };
-    nextStates.push(nextState);
-    rateLimitStates.set(bucket, nextState);
-  }
-  await db.setLoginRateLimits(database, nextStates);
+  await db.recordLoginRateLimitFailures(database, buckets, new Date(nowMs).toISOString());
 }
 
-export async function clearLoginFailures(database: db.QueryDatabase, buckets: string[]): Promise<void> {
-  await db.clearLoginRateLimits(database, buckets);
+export async function clearLoginFailures(
+  database: db.QueryDatabase,
+  buckets: string[],
+  observedStates: LoginRateLimitStateByBucket,
+): Promise<void> {
+  const states: db.LoginRateLimit[] = [];
+  for (const bucket of new Set(buckets)) {
+    const state = observedStates.get(bucket);
+    if (state) states.push(state);
+  }
+  await db.clearObservedLoginRateLimits(database, states);
 }
 
 function runLoginBackground(c: PublicContext, task: Promise<unknown>): void {
@@ -896,7 +871,7 @@ async function completeAdminLogin(
   c: PublicContext,
   database: db.QueryDatabase,
   user: db.User,
-  bucketsToClear: string[],
+  observedStates: LoginRateLimitStateByBucket,
   metrics: TimingMetric[],
 ) {
   let token: string;
@@ -914,8 +889,8 @@ async function completeAdminLogin(
   setAdminSessionCookie(c, token);
   const csrfToken = ensureAdminCsrfCookie(c);
   putAdminSessionEdgeCache(c, user);
-  if (bucketsToClear.length > 0) {
-    runLoginBackground(c, clearLoginFailures(database, bucketsToClear));
+  if ([...observedStates.values()].some(Boolean)) {
+    runLoginBackground(c, clearLoginFailures(database, [...observedStates.keys()], observedStates));
   }
   runLoginBackground(c, db.insertAuditLog(database, user.username, 'login', '用户登录'));
 
@@ -1024,25 +999,33 @@ publicRoutes.post('/admin/recovery', async (c) => {
   const passwordError = validateAdminPasswordStrength(password, username);
   if (passwordError) return c.json({ error: passwordError }, 400);
 
+  // Both initial ownership and recovery require the deployment secret. A stale
+  // empty-account observation must never grant authorization to reset an owner.
+  if (
+    !serviceRoleKey ||
+    serviceRoleKey.length > MAX_ADMIN_RECOVERY_KEY_LENGTH ||
+    !await timingSafeEqualString(serviceRoleKey, resolveSupabaseApiKey(c.env))
+  ) {
+    return c.json({ error: 'Supabase Secret key 无效' }, 403);
+  }
   const database = getDatabase(c.env);
   const userCount = await db.countUsers(database);
   if (userCount > 1) {
     return c.json({ error: '当前存在多个管理员账号，请登录后在账户管理中修改密码' }, 409);
   }
-  if (userCount === 1) {
-    if (!serviceRoleKey || serviceRoleKey.length > MAX_ADMIN_RECOVERY_KEY_LENGTH) {
-      return c.json({ error: 'Supabase Secret key 无效' }, 400);
-    }
-    if (!await timingSafeEqualString(serviceRoleKey, resolveSupabaseApiKey(c.env))) {
-      return c.json({ error: 'Supabase Secret key 无效' }, 403);
-    }
-  }
-
-  const user = await db.recoverSingleAdmin(database, {
+  const candidate = {
     uuid: crypto.randomUUID(),
     username,
     hashedPassword: await hashPassword(password),
-  });
+  };
+  let user: Pick<db.User, 'uuid' | 'username' | 'session_version'>;
+  if (userCount === 0) {
+    const created = await db.createInitialAdmin(database, candidate.uuid, candidate.username, candidate.hashedPassword);
+    if (!created) return c.json({ error: '管理员已创建，请刷新后登录或使用账号恢复' }, 409);
+    user = { uuid: candidate.uuid, username, session_version: 1 };
+  } else {
+    user = await db.recoverSingleAdmin(database, candidate);
+  }
   invalidateAdminSessionCache(user.uuid);
   if (user.session_version > 1) {
     await deleteAdminSessionEdgeCache(c, user.uuid, user.session_version - 1);
@@ -1158,7 +1141,7 @@ publicRoutes.post('/login', async (c) => {
     c,
     database,
     user,
-    [...rateLimitStates.values()].some(Boolean) ? rateLimitBuckets : [],
+    rateLimitStates,
     metrics,
   );
 });
@@ -1209,9 +1192,12 @@ publicRoutes.post('/login/mfa', async (c) => {
 
   const clientIp = getClientIp(c);
   const mfaBuckets = mfaRateLimitBuckets(clientIp, user.uuid);
+  const loginBuckets = loginRateLimitBuckets(clientIp, user.username);
   const nowMs = Date.now();
-  const rateLimitStates = await timed(metrics, 'db_rate_limit', () => loadLoginRateLimitStates(database, mfaBuckets));
-  const retryAfter = getLoginRetryAfterSeconds(rateLimitStates, nowMs);
+  const rateLimitStates = await timed(metrics, 'db_rate_limit', () =>
+    loadLoginRateLimitStates(database, [...loginBuckets, ...mfaBuckets]));
+  const mfaStates = new Map(mfaBuckets.map(bucket => [bucket, rateLimitStates.get(bucket) || null]));
+  const retryAfter = getLoginRetryAfterSeconds(mfaStates, nowMs);
   if (retryAfter > 0) {
     c.header('Retry-After', String(retryAfter));
     await timed(metrics, 'audit_failure', () => auditLoginFailure(database, user.username, clientIp, 'mfa_rate_limited', nowMs));
@@ -1255,8 +1241,7 @@ publicRoutes.post('/login/mfa', async (c) => {
     return c.json({ code: 'MFA_INVALID', error: '验证码或恢复码无效' }, 401);
   }
 
-  const loginBuckets = loginRateLimitBuckets(clientIp, user.username);
-  return completeAdminLogin(c, database, user, [...loginBuckets, ...mfaBuckets], metrics);
+  return completeAdminLogin(c, database, user, rateLimitStates, metrics);
 });
 // 退出登录
 publicRoutes.post('/logout', async (c) => {

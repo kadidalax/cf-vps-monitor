@@ -48,6 +48,12 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function normalizePublicBootstrap(payload: unknown, options: { includeHidden?: boolean } = {}): PublicBootstrapPayload {
   const record = asRecord(payload);
   if (!record) throw new Error('Invalid public bootstrap response');
+  for (const field of ['clients', 'nodes'] as const) {
+    const value = record[field];
+    if (value !== undefined && !Array.isArray(value) && !Array.isArray(asRecord(value)?.data)) {
+      throw new Error(`Invalid public bootstrap ${field} list`);
+    }
+  }
   const normalized = {
     settings: record.settings === undefined ? undefined : normalizePublicSettings(record.settings) || undefined,
     clients: record.clients === undefined ? undefined : normalizePublicClients(record.clients, options),
@@ -100,7 +106,7 @@ function writeClientPatch(patch: PublicBootstrapClientPatch): void {
   setLocalStorageItem(PUBLIC_BOOTSTRAP_CLIENT_PATCH_KEY, JSON.stringify(patch));
 }
 
-function normalizePublicClientPatch(raw: unknown): (Partial<ClientInfo> & { uuid: string }) | null {
+export function normalizePublicClientPatch(raw: unknown): (Partial<ClientInfo> & { uuid: string }) | null {
   const record = asRecord(raw);
   const client = normalizePublicClient(record);
   if (!record || !client) return null;
@@ -155,15 +161,6 @@ function applyClientPatch(clients: ClientInfo[] | undefined, patch: PublicBootst
     const existing = byUuid.get(client.uuid);
     const next = existing ? { ...existing, ...client } : normalizePublicClient(client);
     if (!next) continue;
-    if (existing) {
-      for (const [key, value] of Object.entries(client)) {
-        if (typeof value === 'string' && value === '' && typeof existing[key as keyof ClientInfo] === 'string' && existing[key as keyof ClientInfo]) {
-          (next as unknown as Record<string, unknown>)[key] = existing[key as keyof ClientInfo];
-        }
-      }
-      if (client.price === 0 && existing.price !== 0) next.price = existing.price;
-      if (client.billing_cycle === 0 && existing.billing_cycle !== 0) next.billing_cycle = existing.billing_cycle;
-    }
     byUuid.set(client.uuid, next);
   }
   return sortPublicClients([...byUuid.values()]);
@@ -198,7 +195,14 @@ export function getCachedPublicBootstrap(): PublicBootstrapPayload | null {
 
 export function clearCachedPublicBootstrap(): void {
   bootstrapCache = null;
+  bootstrapInFlight.clear();
   removeLocalStorageItem(PUBLIC_BOOTSTRAP_STORAGE_KEY);
+  clearClientPatch();
+}
+
+function clearClientPatch(): void {
+  clientPatchCache = null;
+  removeLocalStorageItem(PUBLIC_BOOTSTRAP_CLIENT_PATCH_KEY);
 }
 
 export function patchCachedPublicBootstrapClients(detail?: PublicBootstrapClientPatchDetail): void {
@@ -222,6 +226,10 @@ export async function fetchPublicBootstrap(options: { cache?: RequestCache; cach
   const inFlight = bootstrapInFlight.get(key);
   if (inFlight && (!wantsFresh || inFlight.fresh)) return inFlight.promise;
 
+  // Fresh server data supersedes earlier optimistic edits. Edits arriving during
+  // this request remain available to bridge a response started before that edit.
+  if (wantsFresh && !includeHidden) clearClientPatch();
+
   const url = new URL('/api/public/bootstrap', typeof window === 'undefined' ? 'http://localhost' : window.location.origin);
   if (options.cacheBust) url.searchParams.set('_fresh', String(Date.now()));
   if (includeHidden) url.searchParams.set('include_hidden', '1');
@@ -232,7 +240,9 @@ export async function fetchPublicBootstrap(options: { cache?: RequestCache; cach
     })
     .then((payload) => {
       const normalized = normalizePublicBootstrap(payload, { includeHidden });
-      return includeHidden ? normalized : savePublicBootstrap(normalized);
+      return includeHidden || bootstrapInFlight.get(key)?.promise !== promise
+        ? normalized
+        : savePublicBootstrap(normalized);
     })
     .finally(() => {
       if (bootstrapInFlight.get(key)?.promise === promise) bootstrapInFlight.delete(key);

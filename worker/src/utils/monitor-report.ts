@@ -9,10 +9,12 @@ export type MonitorReportPayload = JsonObject & {
   ram_total: number;
   swap: number;
   swap_total: number;
-  load: number;
-  temp: number;
-  disk: number;
-  disk_total: number;
+  load: number | null;
+  temp: number | null;
+  disk: number | null;
+  disk_total: number | null;
+  disk_source?: 'directory';
+  disk_sampled_at?: number;
   net_in: number;
   net_out: number;
   net_total_up: number;
@@ -20,7 +22,7 @@ export type MonitorReportPayload = JsonObject & {
   process_count: number;
   connections: number;
   connections_udp: number;
-  uptime: number;
+  uptime: number | null;
   version: string;
   gpus: GPUInfo[];
 };
@@ -67,6 +69,21 @@ function boundedInteger(min: number, max: number, ...values: unknown[]): number 
   return Math.trunc(boundedNumber(min, max, ...values));
 }
 
+// 负载允许「不可用」：探针在 lxcfs 未虚拟化 loadavg 的容器里读到的是
+// 宿主机负载，与其报一个错值或 0（会被读成空闲），不如显式报 null。
+// 只有探针**显式送了 null** 才算不可用；字段缺失仍按 0 处理，老探针行为不变。
+function boundedNullableNumber(min: number, max: number, primary: unknown, ...fallbacks: unknown[]): number | null {
+  if (primary === null) return null;
+  return boundedNumber(min, max, primary, ...fallbacks);
+}
+
+function measuredTemperature(value: unknown): number | null {
+  const temperature = numberFrom(value);
+  return temperature !== undefined && temperature >= -100 && temperature <= MAX_TEMPERATURE_C
+    ? temperature
+    : null;
+}
+
 function boundedString(value: unknown, maxLength: number): string {
   return String(value || '').trim().slice(0, maxLength);
 }
@@ -105,7 +122,7 @@ export function normalizeMonitorReport(input: unknown): MonitorReportPayload {
   const gpuData = asObject(report.gpu);
   const gpus = normalizeGpuList(gpuData, report.gpus);
 
-  return {
+  const normalized: MonitorReportPayload = {
     ...report,
     cpu: boundedNumber(0, MAX_PERCENT, report.cpu, cpu.usage),
     gpu: boundedNumber(0, MAX_PERCENT, report.gpu, gpuData.average_usage),
@@ -113,10 +130,10 @@ export function normalizeMonitorReport(input: unknown): MonitorReportPayload {
     ram_total: boundedNumber(0, MAX_COUNTER_VALUE, report.ram_total, ram.total),
     swap: boundedNumber(0, MAX_COUNTER_VALUE, report.swap, swap.used),
     swap_total: boundedNumber(0, MAX_COUNTER_VALUE, report.swap_total, swap.total),
-    load: boundedNumber(0, MAX_LOAD_VALUE, report.load, load.load1),
-    temp: boundedNumber(0, MAX_TEMPERATURE_C, report.temp, gpuData.temperature),
-    disk: boundedNumber(0, MAX_COUNTER_VALUE, report.disk, disk.used),
-    disk_total: boundedNumber(0, MAX_COUNTER_VALUE, report.disk_total, disk.total),
+    load: boundedNullableNumber(0, MAX_LOAD_VALUE, report.load, load.load1),
+    temp: measuredTemperature(report.temp),
+    disk: boundedNullableNumber(0, MAX_COUNTER_VALUE, report.disk, disk.used),
+    disk_total: boundedNullableNumber(0, MAX_COUNTER_VALUE, report.disk_total, disk.total),
     net_in: boundedNumber(0, MAX_COUNTER_VALUE, report.net_in, network.down),
     net_out: boundedNumber(0, MAX_COUNTER_VALUE, report.net_out, network.up),
     net_total_up: boundedNumber(0, MAX_COUNTER_VALUE, report.net_total_up, network.totalUp),
@@ -124,14 +141,34 @@ export function normalizeMonitorReport(input: unknown): MonitorReportPayload {
     process_count: boundedInteger(0, MAX_COUNT_VALUE, report.process_count, report.process),
     connections: boundedInteger(0, MAX_COUNT_VALUE, report.connections, connections.tcp),
     connections_udp: boundedInteger(0, MAX_COUNT_VALUE, report.connections_udp, connections.udp),
-    uptime: boundedNumber(0, MAX_UPTIME_SECONDS, report.uptime),
+    uptime: boundedNullableNumber(0, MAX_UPTIME_SECONDS, report.uptime),
     version: boundedString(report.version, 64),
     gpus,
   };
+  // Cached measurements carry their own sampling clock, independent of the
+  // Agent report/Worker receipt clocks. An invalid pair must not look native.
+  delete normalized.disk_source;
+  delete normalized.disk_sampled_at;
+  if (report.disk_source !== undefined || report.disk_sampled_at !== undefined) {
+    const sampledAt = report.disk_sampled_at;
+    const measuredUsed = numberFrom(report.disk) ?? numberFrom(disk.used);
+    if (report.disk_source === 'directory' && normalized.disk !== null && measuredUsed !== undefined
+        && measuredUsed >= 0 && measuredUsed <= MAX_COUNTER_VALUE && typeof sampledAt === 'number'
+        && Number.isSafeInteger(sampledAt) && sampledAt > 0 && sampledAt <= 8_640_000_000_000_000) {
+      normalized.disk_source = 'directory';
+      normalized.disk_sampled_at = sampledAt;
+    } else {
+      normalized.disk = null;
+    }
+  }
+  return normalized;
 }
 
 export function toMonitorRecord(client: string, time: string, input: unknown): MonitorRecord {
   const report = normalizeMonitorReport(input);
+  // Keep measured bytes independently. The numeric schema uses a zero total
+  // to leave the percentage unavailable when either input is unknown.
+  const diskAvailable = report.disk !== null && report.disk_total !== null;
 
   return {
     client,
@@ -142,10 +179,10 @@ export function toMonitorRecord(client: string, time: string, input: unknown): M
     ram_total: report.ram_total || 0,
     swap: report.swap || 0,
     swap_total: report.swap_total || 0,
-    load: report.load || 0,
-    temp: report.temp || 0,
-    disk: report.disk || 0,
-    disk_total: report.disk_total || 0,
+    load: report.load ?? null,
+    temp: report.temp,
+    disk: report.disk ?? 0,
+    disk_total: diskAvailable ? report.disk_total || 0 : 0,
     net_in: report.net_in || 0,
     net_out: report.net_out || 0,
     net_total_up: report.net_total_up || 0,

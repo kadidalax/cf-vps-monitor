@@ -150,6 +150,15 @@ function psQuote(value: string) {
   return "'" + value.replace(/'/g, "''") + "'";
 }
 
+function powershellCommand(script: string): string {
+  let bytes = '';
+  for (let index = 0; index < script.length; index += 1) {
+    const codeUnit = script.charCodeAt(index);
+    bytes += String.fromCharCode(codeUnit & 0xff, codeUnit >>> 8);
+  }
+  return `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${btoa(bytes)}`;
+}
+
 function normalizeTrafficResetDay(value: string) {
   const day = Number.parseInt(value.trim(), 10);
   if (!Number.isFinite(day)) return '1';
@@ -239,8 +248,9 @@ export function buildAgentInstallCommand({
       if (mountExclude) args.push('-MountExclude', mountExclude);
       if (nicInclude) args.push('-NicInclude', nicInclude);
       if (nicExclude) args.push('-NicExclude', nicExclude);
-      return 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ' +
-        `"iwr ${psQuote(cfMonitorAgentScriptUrl('install-windows.ps1', ghproxy, releaseTag, scriptRef))} -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\\install-windows.ps1' ${args.map((arg, index) => index % 2 === 0 ? arg : psQuote(arg)).join(' ')}"`;
+      return powershellCommand(
+        `iwr ${psQuote(cfMonitorAgentScriptUrl('install-windows.ps1', ghproxy, releaseTag, scriptRef))} -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\\install-windows.ps1' ${args.map((arg, index) => index % 2 === 0 ? arg : psQuote(arg)).join(' ')}`,
+      );
     }
     default:
       return '';
@@ -261,8 +271,9 @@ export function buildAgentUninstallAllCommand({
     cfMonitorAgentScriptUrl(file, proxy, '', scriptRef);
   switch (platform) {
     case 'windows':
-      return 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ' +
-        `"iwr ${psQuote(scriptUrl('install-windows.ps1'))} -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\\install-windows.ps1' -UninstallAll -Yes"`;
+      return powershellCommand(
+        `iwr ${psQuote(scriptUrl('install-windows.ps1'))} -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\\install-windows.ps1' -UninstallAll -Yes`,
+      );
     case 'unix':
     default:
       return shPipe(

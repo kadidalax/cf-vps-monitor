@@ -20,6 +20,7 @@ import { Activity, ArrowDown, ArrowUp, Pencil, Plus, Search, Trash2 } from 'luci
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import { useApi } from '../../contexts/AuthContext';
+import { useAdminAction } from '../../hooks/useAdminAction';
 
 interface PingTask {
   id: number;
@@ -330,10 +331,12 @@ function TaskRow({
 
 export default function AdminPingTasks() {
   const apiFetch = useApi();
+  const { run: runAction, pendingActions } = useAdminAction();
   const [tasks, setTasks] = useState<PingTask[]>([]);
   const [clients, setClients] = useState<ClientLite[]>([]);
   const [clientsLoaded, setClientsLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<PingTask | null>(null);
   const [deleteTask, setDeleteTask] = useState<PingTask | null>(null);
@@ -343,9 +346,15 @@ export default function AdminPingTasks() {
   const [scopeFilter, setScopeFilter] = useState<TaskScopeFilter>('all');
 
   const loadData = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
     try {
       const tasksData = await apiFetch('/admin/ping');
       if (Array.isArray(tasksData)) setTasks(tasksData);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Ping 任务加载失败';
+      setLoadError(message);
+      toast.error(message);
     } finally {
       setLoading(false);
     }
@@ -430,7 +439,7 @@ export default function AdminPingTasks() {
     void ensureClients();
   };
 
-  const handleDelete = async () => {
+  const handleDelete = () => runAction('ping:delete', async () => {
     if (!deleteTask) return;
     const result = await apiFetch('/admin/ping/delete', {
       method: 'POST',
@@ -444,7 +453,7 @@ export default function AdminPingTasks() {
     } else {
       toast.error(result.error || '删除失败');
     }
-  };
+  });
 
   const moveTask = async (task: PingTask, direction: 'up' | 'down') => {
     const currentIndex = tasks.findIndex((item) => item.id === task.id);
@@ -478,6 +487,7 @@ export default function AdminPingTasks() {
 
   return (
     <Flex className="admin-ping-page" direction="column" gap="2">
+      {loadError && <Flex align="center" gap="2"><Text color="red" role="alert">{loadError}</Text><Button size="1" variant="soft" onClick={() => void loadData()}>重试</Button></Flex>}
       <Flex className="admin-parent-title-row" justify="between" align="center" mb="3">
         <Flex align="center" gap="2">
           <Activity size={20} />
@@ -648,7 +658,7 @@ export default function AdminPingTasks() {
           </Text>
           <Flex gap="3" justify="end" mt="4">
             <Button variant="soft" onClick={() => setDeleteTask(null)}>取消</Button>
-            <Button color="red" onClick={handleDelete}>确认删除</Button>
+            <Button color="red" onClick={handleDelete} disabled={pendingActions.has('ping:delete')}>确认删除</Button>
           </Flex>
         </Dialog.Content>
       </Dialog.Root>

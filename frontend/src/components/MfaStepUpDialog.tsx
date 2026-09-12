@@ -6,6 +6,7 @@ import { normalizeMfaCode, registerMfaStepUpHandler, type MfaMethod } from '../u
 
 export default function MfaStepUpDialog() {
   const resolver = useRef<((value: boolean) => void) | null>(null);
+  const pendingRequestRef = useRef<{ resolver: (value: boolean) => void; controller: AbortController } | null>(null);
   const [open, setOpen] = useState(false);
   const [method, setMethod] = useState<MfaMethod>('totp');
   const [code, setCode] = useState('');
@@ -16,6 +17,8 @@ export default function MfaStepUpDialog() {
     if (!resolver.current) return;
     const resolve = resolver.current;
     resolver.current = null;
+    pendingRequestRef.current?.controller.abort();
+    pendingRequestRef.current = null;
     setOpen(false);
     setSubmitting(false);
     setCode('');
@@ -30,41 +33,53 @@ export default function MfaStepUpDialog() {
   })), []);
 
   useEffect(() => () => {
+    pendingRequestRef.current?.controller.abort();
+    pendingRequestRef.current = null;
     resolver.current?.(false);
     resolver.current = null;
   }, []);
 
   const submit = async () => {
+    const activeResolver = resolver.current;
+    if (!activeResolver || pendingRequestRef.current) return;
     const normalized = normalizeMfaCode(code, method);
     if (!normalized) {
       setError(method === 'totp' ? '请输入 6 位动态验证码' : '恢复码格式无效');
       return;
     }
 
+    const request = { resolver: activeResolver, controller: new AbortController() };
+    pendingRequestRef.current = request;
+    const isCurrent = () => resolver.current === activeResolver && pendingRequestRef.current === request;
     setSubmitting(true);
     setError('');
     try {
       const { url, init } = buildApiRequest('/admin/account/mfa/step-up', {
         method: 'POST',
+        signal: request.controller.signal,
         body: JSON.stringify({ method, code: normalized }),
       });
       const response = await fetch(url, init);
       const data = await response.json().catch(() => ({}));
+      if (!isCurrent()) return;
       if (!response.ok) {
         setError(data.error || '验证失败');
-        setSubmitting(false);
         return;
       }
       finish(true);
     } catch {
-      setError('网络错误，请稍后重试');
-      setSubmitting(false);
+      if (isCurrent()) setError('网络错误，请稍后重试');
+    } finally {
+      if (pendingRequestRef.current === request) {
+        pendingRequestRef.current = null;
+        setSubmitting(false);
+      }
     }
   };
 
   return (
     <Dialog.Root open={open} onOpenChange={(nextOpen) => {
-      if (!nextOpen && !submitting) finish(false);
+      if (!nextOpen) finish(false);
     }}>
       <Dialog.Content className="mfa-step-up-dialog" style={{ maxWidth: 420 }}>
         <Dialog.Title>
@@ -77,7 +92,9 @@ export default function MfaStepUpDialog() {
         <Flex direction="column" gap="3">
           <SegmentedControl.Root
             value={method}
+            disabled={submitting}
             onValueChange={(value) => {
+              if (pendingRequestRef.current) return;
               setMethod(value as MfaMethod);
               setCode('');
               setError('');
@@ -96,6 +113,7 @@ export default function MfaStepUpDialog() {
               mt="1"
               size="3"
               value={code}
+              readOnly={submitting}
               onChange={(event) => setCode(event.target.value)}
               placeholder={method === 'totp' ? '000000' : 'XXXX-XXXX-XXXX-XXXX-XXXX-XXXX'}
               autoComplete="one-time-code"
@@ -113,7 +131,7 @@ export default function MfaStepUpDialog() {
           {error && <Text size="2" color="red" role="alert">{error}</Text>}
 
           <Flex justify="end" gap="2" mt="2">
-            <Button variant="soft" color="gray" disabled={submitting} onClick={() => finish(false)}>
+            <Button variant="soft" color="gray" onClick={() => finish(false)}>
               取消
             </Button>
             <Button disabled={submitting} onClick={() => void submit()}>

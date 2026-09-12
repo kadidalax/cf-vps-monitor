@@ -40,8 +40,9 @@ const stackItems = [
 ];
 
 const coreFeatures = [
-  '实时 CPU / 内存 / 磁盘 / 网络 / 温度监控',
-  '总流量持久统计，重启后继续累计',
+  '实时 CPU / 内存 / 磁盘 / 网络监控',
+  '节点温度：支持 Linux CPU/SoC 传感器；无有效读数时显示不可用',
+  '流量按节点重置日逐月统计，重启不影响累计',
   '自定义 Ping 任务与延迟图表',
   '网站监控，支持 Worker / Agent 检测',
   '公开状态页，支持 monitor / aurora 主题',

@@ -120,6 +120,12 @@ export function validateLoadNotificationInput(
     .filter((client): client is string => typeof client === 'string')
     .map(client => client.trim())
     .filter(Boolean);
+  if (input.all_clients !== undefined && typeof input.all_clients !== 'boolean') {
+    errors.push('all_clients 必须是布尔值');
+  }
+  if (input.all_clients === false && clients.length === 0) {
+    errors.push('非全局规则必须选择至少一个节点');
+  }
   if (clients.length > 200) {
     errors.push('客户端数量不能超过 200 个');
   }

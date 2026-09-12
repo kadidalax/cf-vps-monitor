@@ -34,7 +34,11 @@ assert.doesNotMatch(agentRoutesSql, /rotateClientToken\(/);
 assert.equal((allMigrationSql.match(/create or replace function public\.cfm_create_client\(/gi) || []).length, 1);
 assert.equal((allMigrationSql.match(/create or replace function public\.cfm_rotate_client_token\(input_uuid text, input_token text, input_token_hash text\)/gi) || []).length, 1);
 assert.doesNotMatch(allMigrationSql, /create or replace function public\.cfm_rotate_client_token\(input_uuid text, input_token_hash text\)/i);
-assert.match(migrationSql, /insert into clients \(uuid, token, token_hash, token_rotated_at, name, sort_order\)[\s\S]*?input_client->>'token',[\s\S]*?input_client->>'token_hash'/i);
+// 建节点必须同时落库明文 token 与 token_hash——漏掉哪一个都会让新节点的
+// 安装 Token 读不回来（2026-07-12 的既有故障）。
+// 这里只锁「token/token_hash 进了 insert 列并被赋值」，不锁整张列清单：
+// 列清单会随功能增长（如 traffic_reset_day），锁死会让每次加字段都误报。
+assert.match(migrationSql, /insert into clients \([\s\S]*?\btoken\b[\s\S]*?\btoken_hash\b[\s\S]*?\)[\s\S]*?input_client->>'token',[\s\S]*?input_client->>'token_hash'/i);
 assert.match(migrationSql, /create or replace function public\.cfm_rotate_client_token\(input_uuid text, input_token text, input_token_hash text\)[\s\S]*?set token = input_token,[\s\S]*?token_hash = input_token_hash/i);
 assert.doesNotMatch(featureSchemaSql, /create or replace function public\.cfm_(?:create_client|rotate_client_token)\(/i);
 assert.doesNotMatch(runtimeDefaultsSql, /create or replace function public\.cfm_(?:create_client|rotate_client_token)\(/i);
@@ -77,3 +81,24 @@ assert.match(migrationSql, /totp_last_used_step\s*=\s*-1/i);
 assert.match(migrationSql, /recovery_code_hashes\s*=\s*'\[\]'::jsonb/i);
 assert.match(migrationSql, /input_code_hash\s*!~\s*'\^\[A-Za-z0-9_-\]\{43\}\$'/i);
 assert.match(runtimeDefaultsSql, /\('webhook_url', ''\)/i);
+
+// 审计节流靠「一条 insert … on conflict do update … where」串行化。任何把它拆回
+// 先 select 再 update 的改法都会让并发请求同时判定可写，同一条错误落多行审计日志。
+// 这里锁三件事：函数在（且两份 SQL 一致）、on conflict 分支在、比较方向没被写反。
+for (const source of [migrationSql, generatedSql]) {
+  assert.match(source, /create or replace function public\.cfm_try_claim_audit_throttle\(/i);
+  for (const role of ['public', 'anon', 'authenticated']) {
+    assert.match(source, new RegExp(`revoke all on function public\\.cfm_try_claim_audit_throttle\\([^;]+\\) from ${role};`, 'i'));
+  }
+  assert.match(source, /grant execute on function public\.cfm_try_claim_audit_throttle\([^;]+\) to service_role;/i);
+}
+const throttleBody = migrationSql.match(
+  /create or replace function public\.cfm_try_claim_audit_throttle\([\s\S]*?\n\$\$;/i,
+)?.[0];
+assert.ok(throttleBody, 'cfm_try_claim_audit_throttle 函数体没截到');
+assert.match(throttleBody, /insert into settings \(key, value\)[\s\S]*?on conflict \(key\) do update/i);
+// 过期才放行：上次写入时间 <= 现在 - 节流窗口。写成 >= 会变成「越新越放行」。
+assert.match(throttleBody, /settings\.value collate "C" <= to_char\(/i);
+assert.match(throttleBody, /input_now - make_interval\(secs => input_throttle_ms \/ 1000\.0\)/i);
+// 时间戳取调用方传入的 input_now，服务端 now() 会引入第二套时钟。
+assert.doesNotMatch(throttleBody, /\bnow\(\)/i);

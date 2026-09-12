@@ -1,5 +1,6 @@
 import { ClientInfo, LiveDataMap, LiveRecord } from '../types';
 import { resolveFlagCode } from '../components/Flag';
+import { getNodeStatus } from './nodeMetrics';
 
 export type OfflinePosition = 'first' | 'keep' | 'last';
 export type NodeStatusFilter = 'all' | 'online' | 'offline';
@@ -36,7 +37,7 @@ export interface AdminFilterOptions extends MonitorFilterOptions {
 }
 
 export function normalizeLiveData(rawLiveData: any): LiveDataMap {
-  if (!rawLiveData) return { online: [], data: {} };
+  if (!rawLiveData) return { online: [], data: {}, statusReady: false };
 
   const online = [...(rawLiveData.online || [])] as string[];
   const data: Record<string, LiveRecord> = {};
@@ -60,7 +61,7 @@ export function normalizeLiveData(rawLiveData: any): LiveDataMap {
     }
   }
 
-  return { online, data };
+  return { online, data, last_known: rawLiveData.last_known || {}, statusReady: rawLiveData.statusReady ?? true };
 }
 
 export function getNodeStatsSummary(
@@ -127,7 +128,8 @@ export function filterMonitorNodes(
   const term = searchTerm.trim().toLowerCase();
 
   const filtered = clients.filter((client) => {
-    const isOnline = liveData.online.includes(client.uuid);
+    const status = getNodeStatus(client.uuid, liveData);
+    const isOnline = status === 'online';
 
     if (selectedGroup !== 'all' && client.group !== selectedGroup) {
       return false;
@@ -137,7 +139,7 @@ export function filterMonitorNodes(
       return false;
     }
 
-    if (statusFilter === 'offline' && isOnline) {
+    if (statusFilter === 'offline' && status !== 'offline') {
       return false;
     }
 
@@ -220,14 +222,14 @@ function applyOfflinePosition(
   liveData: LiveDataMap,
   offlinePosition: OfflinePosition,
 ): ClientInfo[] {
-  if (offlinePosition === 'keep') return [...clients];
+  if (offlinePosition === 'keep' || liveData.statusReady === false) return [...clients];
 
   return [...clients].sort((a, b) => {
     const aOnline = liveData.online.includes(a.uuid);
     const bOnline = liveData.online.includes(b.uuid);
 
     if (aOnline === bOnline) {
-      return (a.name || '').localeCompare(b.name || '');
+      return 0;
     }
 
     if (offlinePosition === 'first') {

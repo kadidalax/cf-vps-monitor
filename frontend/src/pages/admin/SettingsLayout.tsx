@@ -14,7 +14,8 @@ export interface SettingsLayoutOutletContext {
   setAction: (action: React.ReactNode) => void;
   settingsCache: Partial<Record<SettingsScope, SettingsMap>>;
   loadSettingsScope: (scope: SettingsScope) => Promise<SettingsMap>;
-  setSettingsScope: (scope: SettingsScope, settings: SettingsMap) => void;
+  setSettingsScope: (scope: SettingsScope, settings: SettingsMap | ((confirmed: SettingsMap) => SettingsMap)) => void;
+  invalidateSettingsScopes: () => void;
 }
 
 type SettingsScope = 'site' | 'general';
@@ -27,8 +28,9 @@ export default function SettingsLayout() {
   const settingsCacheRef = useRef(settingsCache);
   const settingsRequestsRef = useRef<Partial<Record<SettingsScope, Promise<SettingsMap>>>>({});
 
-  const setSettingsScope = useCallback((scope: SettingsScope, settings: SettingsMap) => {
-    settingsCacheRef.current = { ...settingsCacheRef.current, [scope]: settings };
+  const setSettingsScope = useCallback((scope: SettingsScope, settings: SettingsMap | ((confirmed: SettingsMap) => SettingsMap)) => {
+    const confirmed = typeof settings === 'function' ? settings(settingsCacheRef.current[scope] || {}) : settings;
+    settingsCacheRef.current = { ...settingsCacheRef.current, [scope]: confirmed };
     setSettingsCacheState(settingsCacheRef.current);
   }, []);
 
@@ -39,20 +41,29 @@ export default function SettingsLayout() {
     if (pending) return pending;
     const request = apiFetch(`/admin/settings?scope=${scope}`)
       .then((data) => {
-        const settings = data && typeof data === 'object' ? data as SettingsMap : {};
-        setSettingsScope(scope, settings);
+        if (!data || typeof data !== 'object' || Array.isArray(data) || Object.values(data).some(value => typeof value !== 'string')) {
+          throw new Error('设置响应格式无效');
+        }
+        const settings = data as SettingsMap;
+        if (settingsRequestsRef.current[scope] === request) setSettingsScope(scope, settings);
         return settings;
       })
       .finally(() => {
-        delete settingsRequestsRef.current[scope];
+        if (settingsRequestsRef.current[scope] === request) delete settingsRequestsRef.current[scope];
       });
     settingsRequestsRef.current[scope] = request;
     return request;
   }, [apiFetch, setSettingsScope]);
 
+  const invalidateSettingsScopes = useCallback(() => {
+    settingsCacheRef.current = {};
+    settingsRequestsRef.current = {};
+    setSettingsCacheState({});
+  }, []);
+
   useEffect(() => {
-    void loadSettingsScope('site');
-    void loadSettingsScope('general');
+    void loadSettingsScope('site').catch(() => {});
+    void loadSettingsScope('general').catch(() => {});
   }, [loadSettingsScope]);
 
   const isActive = (tab: typeof settingsTabs[0]) => {
@@ -90,7 +101,7 @@ export default function SettingsLayout() {
         {action && <Flex className="admin-subnav-actions" align="center" gap="2">{action}</Flex>}
       </Flex>
 
-      <Outlet context={{ setAction, settingsCache, loadSettingsScope, setSettingsScope }} />
+      <Outlet context={{ setAction, settingsCache, loadSettingsScope, setSettingsScope, invalidateSettingsScopes }} />
     </div>
   );
 }

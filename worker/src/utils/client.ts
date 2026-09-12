@@ -19,7 +19,7 @@ const TEXT_LIMITS: Record<string, number> = {
 };
 const TEXT_FIELDS = new Set(Object.keys(TEXT_LIMITS));
 const BOOLEAN_FIELDS = new Set(['auto_renewal', 'hidden']);
-const INTEGER_FIELDS = new Set(['cpu_cores', 'billing_cycle', 'mem_total', 'swap_total', 'disk_total', 'traffic_limit']);
+const INTEGER_FIELDS = new Set(['cpu_cores', 'billing_cycle', 'mem_total', 'swap_total', 'disk_total', 'traffic_limit', 'traffic_reset_day']);
 const NUMBER_FIELDS = new Set(['price']);
 const TRAFFIC_LIMIT_TYPES = new Set(['sum', 'max', 'min', 'up', 'down', 'unlimited']);
 const MAX_TAGS = 50;
@@ -82,6 +82,8 @@ function numericBounds(field: string): { min: number; max: number } {
       return { min: 0, max: 1024 };
     case 'billing_cycle':
       return { min: -1, max: 36_500 };
+    case 'traffic_reset_day':
+      return { min: 1, max: 31 };
     case 'traffic_limit':
     case 'mem_total':
     case 'swap_total':

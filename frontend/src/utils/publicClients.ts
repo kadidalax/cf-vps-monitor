@@ -86,11 +86,13 @@ export function normalizePublicClients(payload: unknown, options: { includeHidde
 }
 
 export function sortPublicClients(clients: ClientInfo[]): ClientInfo[] {
-  return [...clients].sort((a, b) => {
-    const aOrder = Number.isFinite(a.sort_order) ? Number(a.sort_order) : Number.MAX_SAFE_INTEGER;
-    const bOrder = Number.isFinite(b.sort_order) ? Number(b.sort_order) : Number.MAX_SAFE_INTEGER;
-    return aOrder - bOrder || (a.name || '').localeCompare(b.name || '') || a.uuid.localeCompare(b.uuid);
-  });
+  return [...clients].sort(comparePublicClients);
+}
+
+export function comparePublicClients(a: ClientInfo, b: ClientInfo): number {
+  const aOrder = Number.isFinite(a.sort_order) ? Number(a.sort_order) : Number.MAX_SAFE_INTEGER;
+  const bOrder = Number.isFinite(b.sort_order) ? Number(b.sort_order) : Number.MAX_SAFE_INTEGER;
+  return aOrder - bOrder || (a.name || '').localeCompare(b.name || '') || a.uuid.localeCompare(b.uuid);
 }
 
 export function mergePublicClientPatch(

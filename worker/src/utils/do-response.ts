@@ -2,6 +2,7 @@ export type LiveSnapshot = {
   online: string[];
   clients?: Record<string, unknown>[];
   data?: Record<string, unknown>;
+  last_known?: Record<string, unknown>;
   count: number;
   timestamp?: number;
   metadata_version?: string;
@@ -60,6 +61,9 @@ export async function readLiveSnapshot(response: Response): Promise<LiveSnapshot
   }
   if (isRecord(value.data)) {
     snapshot.data = value.data;
+  }
+  if (isRecord(value.last_known)) {
+    snapshot.last_known = value.last_known;
   }
   if (typeof value.timestamp === 'number' && Number.isFinite(value.timestamp)) {
     snapshot.timestamp = value.timestamp;

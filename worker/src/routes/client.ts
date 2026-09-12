@@ -217,6 +217,7 @@ function normalizeLiveAgentAuthClient(value: unknown): db.Client | null {
     hidden: clientBooleanField(value, 'hidden'),
     traffic_limit: clientNumberField(value, 'traffic_limit'),
     traffic_limit_type: clientStringField(value, 'traffic_limit_type') || 'sum',
+    traffic_reset_day: clientNumberField(value, 'traffic_reset_day') || 1,
     sort_order: typeof value.sort_order === 'number' && Number.isFinite(value.sort_order) ? value.sort_order : undefined,
     created_at: clientStringField(value, 'created_at'),
     updated_at: clientStringField(value, 'updated_at'),
@@ -498,6 +499,12 @@ function nonNegativeNumber(value: unknown, fallback = 0): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
+function diskTotalFromReport(value: unknown, fallback = 0): number {
+  // Missing fields belong to older Agents; an explicit unknown must clear a
+  // previously reported host filesystem capacity instead of restoring it.
+  return value === undefined ? fallback : positiveNumber(value);
+}
+
 function clientFieldChanged(current: unknown, next: unknown): boolean {
   if (typeof next === 'number') return Number(current || 0) !== next;
   return String(current ?? '') !== String(next ?? '');
@@ -624,29 +631,28 @@ async function updateLiveReport(
     reportBody = { report };
   }
   if (!report) return false;
-  try {
-    const doId = c.env.LIVE_DATA.idFromName('global');
-    const stub = c.env.LIVE_DATA.get(doId);
-    const response = await stub.fetch(new Request('https://do/client-report', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        uuid,
-        name,
-        hidden,
-        source_ip: requestClientIp(c),
-        region: requestRegion(c),
-        ...reportBody,
-        timestamp: nowMs,
-        ttl_ms: liveReportTtlMs(report),
-      }),
-    }));
-    const result = await readClientReportResult(response);
-    return Boolean(response.ok && result?.persisted);
-  } catch {
-    // HTTP reports remain accepted even if the realtime fanout path is unavailable.
-    return false;
+  const doId = c.env.LIVE_DATA.idFromName('global');
+  const stub = c.env.LIVE_DATA.get(doId);
+  const response = await stub.fetch(new Request('https://do/client-report', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      uuid,
+      name,
+      hidden,
+      source_ip: requestClientIp(c),
+      region: requestRegion(c),
+      ...reportBody,
+      timestamp: nowMs,
+      ttl_ms: liveReportTtlMs(report),
+    }),
+  }));
+  const result = await readClientReportResult(response);
+  if (!response.ok || !result) {
+    throw new Error('Live report persistence was not acknowledged');
   }
+  // History may remain queued or disabled after the durable last report is accepted.
+  return result.persisted;
 }
 
 function buildSafeLiveBasicInfoClient(
@@ -697,6 +703,7 @@ async function syncLiveBasicInfoMetadata(c: ClientContext, client: Record<string
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
+      source: 'agent',
       client,
       uuid,
       name: typeof client.name === 'string' ? client.name : uuid,
@@ -748,7 +755,7 @@ async function syncBasicInfoFromReportBatch(
       : preferredRegion(basicInfoPayload.region, oldClient?.region, edgeRegion),
     mem_total: positiveNumber(basicInfoPayload.mem_total, oldClient?.mem_total || 0),
     swap_total: nonNegativeNumber(basicInfoPayload.swap_total, oldClient?.swap_total || 0),
-    disk_total: positiveNumber(basicInfoPayload.disk_total, oldClient?.disk_total || 0),
+    disk_total: diskTotalFromReport(basicInfoPayload.disk_total, oldClient?.disk_total || 0),
     version: nonEmptyString(basicInfoPayload.version, oldClient?.version || ''),
   });
   const ipChange = ipChangeParts(
@@ -758,13 +765,11 @@ async function syncBasicInfoFromReportBatch(
     inferredIpv6 !== undefined ? inferredIpv6 : oldIpv6,
   );
   if (Object.keys(patch).length > 0) {
+    await db.updateClient(database, uuid, patch);
     await syncLiveBasicInfoMetadata(c, buildSafeLiveBasicInfoClient(uuid, displayName, hidden, oldClient, patch)).catch(() => undefined);
     invalidatePublicMetadataCache();
     invalidateAgentClientAuthCache({ uuid, token: oldClient?.token });
-    runClientBackground(c, (async () => {
-      await db.updateClient(database, uuid, patch);
-      await recordIpChangeIfEnabled(database, displayName, ipChange);
-    })());
+    runClientBackground(c, recordIpChangeIfEnabled(database, displayName, ipChange));
   } else {
     runClientBackground(c, recordIpChangeIfEnabled(database, displayName, ipChange));
   }
@@ -779,6 +784,8 @@ async function fallbackAgentPolicy(database: db.QueryDatabase, uuid?: string) {
     ? agentPingTasksForClient(await listAgentPingTasks(database), uuid, Math.floor(pingIntervalSec))
     : [];
   const websiteProbeTasks = await agentWebsiteProbeTasksForClient(database, uuid);
+  const client = uuid ? await db.getClient(database, uuid).catch(() => null) : null;
+  const trafficResetDay = Number(client?.traffic_reset_day);
   return {
     type: 'policy',
     mode: 'idle',
@@ -793,6 +800,9 @@ async function fallbackAgentPolicy(database: db.QueryDatabase, uuid?: string) {
     viewer_ttl_sec: Math.floor(viewerTtlSec),
     policy_ttl_sec: 120,
     idle_policy_ttl_sec: 120,
+    ...(Number.isInteger(trafficResetDay) && trafficResetDay >= 1 && trafficResetDay <= 31
+      ? { traffic_reset_day: trafficResetDay }
+      : {}),
     timestamp: Date.now(),
   };
 }
@@ -1120,7 +1130,7 @@ clientRoutes.post('/uploadBasicInfo', clientAuth, async (c) => {
         : preferredRegion(body.region, oldClient?.region, edgeRegion),
       mem_total: positiveNumber(body.mem_total, oldClient?.mem_total || 0),
       swap_total: nonNegativeNumber(body.swap_total, oldClient?.swap_total || 0),
-      disk_total: positiveNumber(body.disk_total, oldClient?.disk_total || 0),
+      disk_total: diskTotalFromReport(body.disk_total, oldClient?.disk_total || 0),
       version: nonEmptyString(body.version, oldClient?.version || ''),
     });
     const ipChange = ipChangeParts(
@@ -1130,13 +1140,11 @@ clientRoutes.post('/uploadBasicInfo', clientAuth, async (c) => {
       inferredIpv6 !== undefined ? inferredIpv6 : oldIpv6,
     );
     if (Object.keys(patch).length > 0) {
+      await db.updateClient(database, uuid, patch);
       await syncLiveBasicInfoMetadata(c, buildSafeLiveBasicInfoClient(uuid, displayName, Boolean(c.get('clientHidden')), oldClient, patch)).catch(() => undefined);
       invalidatePublicMetadataCache();
       invalidateAgentClientAuthCache({ uuid, token: oldClient?.token });
-      runClientBackground(c, (async () => {
-        await db.updateClient(database, uuid, patch);
-        await recordIpChangeIfEnabled(database, displayName, ipChange);
-      })());
+      runClientBackground(c, recordIpChangeIfEnabled(database, displayName, ipChange));
     } else {
       runClientBackground(c, recordIpChangeIfEnabled(database, displayName, ipChange));
     }

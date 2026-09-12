@@ -10,6 +10,8 @@ import { SettingCard, SettingInput, SettingToggle } from '../../components/admin
 import { getChangedSettings, type SettingsMap } from '../../utils/settingsDiff';
 import { notifyPublicDataUpdated } from '../../utils/publicDataEvents';
 import type { SettingsLayoutOutletContext } from './SettingsLayout';
+import { buildResourceEstimates, type ResourceEstimate } from '../../../../worker/src/utils/capacity-estimate';
+import CapacityResources from '../../components/admin/CapacityResources';
 
 interface CapacityEstimate {
   clients: number;
@@ -18,6 +20,18 @@ interface CapacityEstimate {
   record_persist_interval_sec?: number;
   ping_record_persist_interval_sec?: number;
   record_high_watermark_rows?: number;
+  record_high_watermark_bytes?: number;
+  // Physical allocation is diagnostic; live data estimates drive the history budget.
+  history_total_bytes?: number | null;
+  history_storage_usage?: {
+    estimated_live_storage_bytes: number;
+    allocated_bytes: number;
+    live_rows?: number;
+    live_row_bytes?: number;
+    reusable_bytes?: null;
+    measurement?: string;
+  } | null;
+  resource_estimates?: ResourceEstimate[];
   active_monitor_records_per_day?: number;
   idle_monitor_records_per_day?: number;
   monitor_records_per_day?: number;
@@ -82,6 +96,11 @@ interface CapacityEstimate {
       };
     };
     workers?: {
+      requests?: {
+        daily_free?: number;
+        monthly_included?: number;
+        comparison_month_days?: number;
+      };
       requests_per_day?: {
         free?: number;
         paid_included?: number;
@@ -98,8 +117,10 @@ const MIN_IDLE_UPLOAD_SEC = 60;
 const DEFAULT_VIEWER_TTL_SEC = 120;
 const DEFAULT_RECORD_PERSIST_SEC = 120;
 const DEFAULT_PING_RECORD_PERSIST_SEC = 120;
-const DEFAULT_RECORD_HIGH_WATERMARK_ROWS = 450_000;
+const DEFAULT_RECORD_HIGH_WATERMARK_ROWS = 700_000;
+const DEFAULT_RECORD_HIGH_WATERMARK_BYTES = 419_430_400;
 const DEFAULT_DAILY_VIEW_MINUTES = 60;
+const DEFAULT_OFFLINE_CONFIRM_ROUNDS = 3;
 const SUPABASE_FREE_DATABASE_STORAGE_REFERENCE_BYTES = 500 * 1024 * 1024;
 const SUPABASE_PRO_DATABASE_STORAGE_REFERENCE_BYTES = 8 * 1024 * 1024 * 1024;
 const ESTIMATED_MONITOR_RECORD_BYTES = 420;
@@ -107,12 +128,10 @@ const ESTIMATED_GPU_SNAPSHOT_BYTES = 420;
 const ESTIMATED_PING_RECORD_BYTES = 160;
 const ESTIMATED_PING_SNAPSHOT_BYTES = 220;
 const WORKER_FREE_DAILY_REQUESTS = 100_000;
-const WORKER_PAID_DAILY_REQUESTS = 10_000_000;
+const WORKER_PAID_MONTHLY_REQUESTS = 10_000_000;
 // 与 worker/wrangler.toml 的 crons 配置保持一致（每 2 分钟一次）：
 // 定时任务是空闲基线的主要来源，实测约占 94%。
 const CRON_INVOCATIONS_PER_DAY = 720;
-// Cloudflare 对入站 WebSocket 消息按 20:1 折算计费（出站消息与协议 ping 免费）。
-const WEBSOCKET_MESSAGE_BILLING_RATIO = 20;
 const CAPACITY_COUNT_FAR_CHECK_SEC = 6 * 60 * 60;
 const CAPACITY_COUNT_NEAR_CHECK_SEC = 10 * 60;
 const CAPACITY_COUNT_CRITICAL_CHECK_SEC = 60;
@@ -146,12 +165,7 @@ function getSettingValue(settings: SettingsMap, key: string, fallback: string): 
 }
 
 function normalizeGeneralSettings(settings: SettingsMap): SettingsMap {
-  return {
-    ...settings,
-    record_persist_interval_sec: settings.record_persist_interval_sec === '60' ? '120' : settings.record_persist_interval_sec,
-    ping_record_persist_interval_sec: settings.ping_record_persist_interval_sec === '300' ? '120' : settings.ping_record_persist_interval_sec,
-    live_poll_idle_interval_sec: settings.live_poll_idle_interval_sec === '600' ? '120' : settings.live_poll_idle_interval_sec,
-  };
+  return { ...settings };
 }
 
 function getPercentTone(value: number): 'green' | 'amber' | 'red' {
@@ -234,8 +248,9 @@ function QuotaBar({
   caption: string;
   icon: React.ReactNode;
 }) {
-  const clamped = Math.max(0, Math.min(100, percent));
-  const tone = getPercentTone(percent);
+  const known = Number.isFinite(percent);
+  const clamped = known ? Math.max(0, Math.min(100, percent)) : 0;
+  const tone = known ? getPercentTone(percent) : 'gray';
 
   return (
     <div className={`quota-estimate-card quota-estimate-card-${tone}`}>
@@ -247,7 +262,7 @@ function QuotaBar({
             <Text size="3" weight="bold" style={{ fontFamily: 'var(--font-mono, monospace)' }}>{value}</Text>
           </Flex>
         </Flex>
-        <Badge variant="soft" color={tone}>{formatPercent(percent)}</Badge>
+        <Badge variant="soft" color={tone}>{known ? formatPercent(percent) : '未知'}</Badge>
       </Flex>
       <div className="quota-estimate-track" aria-hidden="true">
         <div className="quota-estimate-fill" style={{ width: `${clamped}%` }} />
@@ -264,6 +279,9 @@ export default function SettingsGeneral() {
   const [originalSettings, setOriginalSettings] = useState<SettingsMap>(() => settingsCache.general || {});
   const [capacity, setCapacity] = useState<CapacityEstimate | null>(null);
   const [loading, setLoading] = useState(!settingsCache.general);
+  const [settingsReady, setSettingsReady] = useState(Boolean(settingsCache.general));
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const [saving, setSaving] = useState(false);
   const [cleaning, setCleaning] = useState(false);
   const [refreshingCounts, setRefreshingCounts] = useState(false);
@@ -282,18 +300,30 @@ export default function SettingsGeneral() {
   }, [apiFetch]);
 
   useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
     loadSettingsScope('general')
       .then((settingsData) => {
+        if (cancelled) return;
         setSettings(normalizeGeneralSettings(settingsData));
         setOriginalSettings(settingsData);
+        setSettingsReady(true);
       })
-      .finally(() => setLoading(false));
+      .catch((error: unknown) => {
+        if (!cancelled) setLoadError(error instanceof Error ? error.message : '读取设置失败');
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [loadSettingsScope, reloadKey]);
+
+  useEffect(() => {
     apiFetch('/admin/capacity')
       .then((capacityData) => {
         if (capacityData && typeof capacityData === 'object') setCapacity(capacityData as CapacityEstimate);
       })
       .catch(() => {});
-  }, [apiFetch, loadSettingsScope]);
+  }, [apiFetch]);
 
   const updateSetting = (key: string, value: string) => {
     setSettings((prev) => ({ ...prev, [key]: value }));
@@ -317,6 +347,7 @@ export default function SettingsGeneral() {
       'record_persist_interval_sec',
       'ping_record_persist_interval_sec',
       'record_high_watermark_rows',
+      'record_high_watermark_bytes',
       'capacity_daily_view_minutes',
     ].some((key) => settings[key] !== originalSettings[key]);
     const clients = Math.max(0, Number(capacity?.clients || 0));
@@ -375,6 +406,18 @@ export default function SettingsGeneral() {
       1000,
       10_000_000,
     );
+    const recordHighWatermarkBytes = clampInteger(
+      settings.record_high_watermark_bytes,
+      Number(capacity?.record_high_watermark_bytes || DEFAULT_RECORD_HIGH_WATERMARK_BYTES),
+      16_777_216,
+      549_755_813_888,
+    );
+    const measuredLiveBytes = capacity?.history_storage_usage?.estimated_live_storage_bytes;
+    const hasHistoryBytes = typeof measuredLiveBytes === 'number' && Number.isFinite(measuredLiveBytes) && measuredLiveBytes >= 0;
+    const historyLiveBytes = hasHistoryBytes ? measuredLiveBytes : 0;
+    const measuredAllocatedBytes = capacity?.history_storage_usage?.allocated_bytes ?? capacity?.history_total_bytes;
+    const hasAllocatedBytes = typeof measuredAllocatedBytes === 'number' && Number.isFinite(measuredAllocatedBytes) && measuredAllocatedBytes >= 0;
+    const historyAllocatedBytes = hasAllocatedBytes ? measuredAllocatedBytes : 0;
     const dailyViewMinutes = clampInteger(
       settings.capacity_daily_view_minutes,
       Number(capacity?.capacity_daily_view_minutes || DEFAULT_DAILY_VIEW_MINUTES),
@@ -454,10 +497,10 @@ export default function SettingsGeneral() {
       : Math.max(localEstimatedStorageBytes, Number(capacity?.estimated_storage_bytes || 0));
     const supabaseProStorageReferenceBytes = capacity?.quota_reference?.database?.storage_bytes?.pro_project_reference ||
       SUPABASE_PRO_DATABASE_STORAGE_REFERENCE_BYTES;
-    const workerFreeDailyRequests = capacity?.quota_reference?.workers?.requests_per_day?.free ||
+    const workerFreeDailyRequests = capacity?.quota_reference?.workers?.requests?.daily_free || capacity?.quota_reference?.workers?.requests_per_day?.free ||
       WORKER_FREE_DAILY_REQUESTS;
-    const workerPaidDailyRequests = capacity?.quota_reference?.workers?.requests_per_day?.paid_included ||
-      WORKER_PAID_DAILY_REQUESTS;
+    const workerPaidMonthlyRequests = capacity?.quota_reference?.workers?.requests?.monthly_included || WORKER_PAID_MONTHLY_REQUESTS;
+    const comparisonMonthDays = capacity?.quota_reference?.workers?.requests?.comparison_month_days || 30;
     const localHistoryRowsPerDay = monitorWritesPerDay + gpuSnapshotsPerDay + pingRowsPerDay;
     const historyRowsPerDay = hasLocalCapacityEdits
       ? localHistoryRowsPerDay
@@ -477,23 +520,23 @@ export default function SettingsGeneral() {
       0,
       Number(capacity?.agent_websocket_connects_per_day || clients),
     );
-    // Agent 的 ping 拉取 / 结果上报 / basic_info 上报全部走 WebSocket，
-    // 按 Durable Object 入站消息计费（20:1），**不是** Worker 请求。
-    // 此前这里把它们直接当 Worker 请求相加，导致面板显示远高于实际。
-    const agentWebsocketMessagesPerDay = agentPingTaskPullsPerDay
-      + pingResultReportsPerDay
-      + agentBasicInfoReportsPerDay;
-    const localWorkerRequestsPerDay = CRON_INVOCATIONS_PER_DAY
-      + agentWebsocketConnectsPerDay;
-    const localDurableObjectRequestsPerDay = Math.ceil(
-      agentWebsocketMessagesPerDay / WEBSOCKET_MESSAGE_BILLING_RATIO,
-    ) + agentWebsocketConnectsPerDay;
-    const mixedWorkerRequestsPerDay = hasLocalCapacityEdits
-      ? localWorkerRequestsPerDay
-      : Math.max(localWorkerRequestsPerDay, Number(capacity?.estimated_worker_requests_per_day || 0));
-    const mixedDurableObjectRequestsPerDay = hasLocalCapacityEdits
-      ? localDurableObjectRequestsPerDay
-      : Math.max(localDurableObjectRequestsPerDay, Number(capacity?.estimated_durable_object_requests_per_day || 0));
+    const pingTaskStateWritesPerDay = recordEnabled ? (capacity?.ping_tasks || []).reduce(
+      (sum, task) => sum + Math.ceil(Math.max(0, Number(task.target_client_count || 0)) * 86400 / pingRecordPersistIntervalSec), 0,
+    ) : 0;
+    const resourcePreview = buildResourceEstimates({
+      clientCount: clients, activeSecondsPerDay, sampleIntervalSec,
+      idleIntervalSec: idleUploadIntervalSec, monitorRecordsPerDay: monitorWritesPerDay,
+      pingTaskStateWritesPerDay, pingTaskPullsPerDay: agentPingTaskPullsPerDay,
+      pingResultReportsPerDay, basicInfoReportsPerDay: agentBasicInfoReportsPerDay,
+      connectionsPerDay: agentWebsocketConnectsPerDay, cronInvocationsPerDay: CRON_INVOCATIONS_PER_DAY,
+      estimatedSupabaseStorageBytes: estimatedStorageBytes,
+    });
+    const resourceEstimates = !hasLocalCapacityEdits && Array.isArray(capacity?.resource_estimates)
+      ? capacity.resource_estimates : resourcePreview.resource_estimates;
+    const mixedWorkerRequestsPerDay = resourceEstimates.find(row => row.key === 'worker_requests')?.websocket ?? resourcePreview.estimated_worker_requests_per_day;
+    const mixedDurableObjectRequestsPerDay = resourceEstimates.find(row => row.key === 'durable_object_requests')?.websocket ?? resourcePreview.estimated_durable_object_requests_per_day;
+    const mixedWorkerRequestsPerMonth = mixedWorkerRequestsPerDay * comparisonMonthDays;
+    const freeTierExceeded = resourceEstimates.some(row => row.within_free_websocket === false || row.within_free_http === false);
     const capacityCountCheckIntervalSec = recordEnabled
       ? estimateCapacityCountCheckIntervalSec(estimatedRowsRetained, recordHighWatermarkRows)
       : 0;
@@ -537,19 +580,32 @@ export default function SettingsGeneral() {
       estimatedRowsRetained,
       estimatedStorageBytes,
       highWatermarkPercent: estimatedRowsRetained / recordHighWatermarkRows * 100,
+      recordHighWatermarkBytes,
+      historyLiveBytes,
+      historyAllocatedBytes,
+      hasAllocatedBytes,
+      hasHistoryBytes,
+      highWatermarkBytesPercent: hasHistoryBytes
+        ? historyLiveBytes / recordHighWatermarkBytes * 100
+        : Number.NaN,
       storagePercent: estimatedStorageBytes / freeStorageBytes * 100,
       freeStorageBytes,
       supabaseProStorageReferenceBytes,
       workerFreeDailyRequests,
-      workerPaidDailyRequests,
+      workerPaidMonthlyRequests,
+      comparisonMonthDays,
+      resourceEstimates,
+      freeTierExceeded,
       mixedWorkerRequestsPerDay,
+      mixedWorkerRequestsPerMonth,
       mixedDurableObjectRequestsPerDay,
       mixedWorkerPercent: mixedWorkerRequestsPerDay / workerFreeDailyRequests * 100,
-      mixedPaidWorkerPercent: mixedWorkerRequestsPerDay / workerPaidDailyRequests * 100,
+      mixedPaidWorkerPercent: mixedWorkerRequestsPerMonth / workerPaidMonthlyRequests * 100,
     };
   }, [capacity, originalSettings, settings]);
 
   const handleSave = useCallback(async () => {
+    if (!settingsReady || loading || loadError || saving) return;
     const payload = {
       ...settings,
       record_preserve_time: String(derived.retentionHours),
@@ -589,7 +645,7 @@ export default function SettingsGeneral() {
     } finally {
       setSaving(false);
     }
-  }, [apiFetch, derived, originalSettings, setSettingsScope, settings]);
+  }, [apiFetch, derived, originalSettings, setSettingsScope, settings, settingsReady, loading, loadError, saving]);
 
   const handleMaintenanceCleanup = useCallback(async () => {
     setCleaning(true);
@@ -600,9 +656,10 @@ export default function SettingsGeneral() {
       });
       if (result.success) {
         const deleted = result.deleted || {};
-        const totalDeleted = ['records', 'gpu_records', 'gpu_snapshots', 'ping_records', 'ping_snapshots', 'audit_logs']
+        const totalDeleted = ['records', 'gpu_records', 'gpu_snapshots', 'ping_records', 'ping_snapshots', 'website_checks', 'audit_logs']
           .reduce((sum, key) => sum + Number(deleted[key] || 0), 0);
-        toast.success(`维护清理完成，删除 ${formatInteger(totalDeleted)} 行历史数据`);
+        if (result.has_more) toast.info(`已清理一批，删除 ${formatInteger(totalDeleted)} 行历史数据；仍有过期记录，可继续清理`);
+        else toast.success(`维护清理完成，删除 ${formatInteger(totalDeleted)} 行历史数据`);
         await refreshCapacity(true);
       } else {
         toast.error(result.error || '维护清理失败');
@@ -629,10 +686,10 @@ export default function SettingsGeneral() {
   }, [refreshCapacity]);
 
   const headerAction = useMemo(() => (
-    <Button onClick={handleSave} disabled={loading || saving}>
+    <Button onClick={handleSave} disabled={!settingsReady || loading || Boolean(loadError) || saving}>
       <Save size={16} /> {saving ? '保存中…' : '保存'}
     </Button>
-  ), [handleSave, loading, saving]);
+  ), [handleSave, settingsReady, loading, loadError, saving]);
 
   useEffect(() => {
     setAction(headerAction);
@@ -641,8 +698,15 @@ export default function SettingsGeneral() {
 
   if (loading) return <Loading />;
 
+  const loadFailure = loadError && <Flex align="center" gap="2">
+    <Text color="red" role="alert">读取设置失败：{loadError}</Text>
+    <Button variant="soft" onClick={() => setReloadKey(value => value + 1)}>重试</Button>
+  </Flex>;
+  if (!settingsReady) return loadFailure;
+
   return (
     <Flex direction="column" gap="4">
+      {loadFailure}
       <SettingCard title="采集与记录策略" description="统一设置 Agent 采集、历史记录、存储水位与 Worker 用量估算" defaultOpen>
         <div className="general-settings-workspace">
           <section className="general-settings-manual-panel" aria-labelledby="general-settings-manual-title">
@@ -664,8 +728,8 @@ export default function SettingsGeneral() {
                 />
               </div>
               <SettingInput
-                label="数据保留时间（小时）"
-                description="单位为小时，最大 72 小时（3 天）；同时作用于监控历史和 Ping 历史"
+                label="历史保留时长（小时）"
+                description="超过该时长的历史记录会被定时清理。上限 72 小时（3 天），填更大的值也会被截断；同时作用于监控历史与 Ping 历史"
                 value={getSettingValue(settings, 'record_preserve_time', getSettingValue(settings, 'ping_record_preserve_time', String(DEFAULT_RETENTION_HOURS)))}
                 onChange={updateRetentionHours}
                 type="number"
@@ -673,8 +737,8 @@ export default function SettingsGeneral() {
                 width="100%"
               />
               <SettingInput
-                label="每日观看时间（分钟/天）"
-                description="用于配额估算，默认按每天实际打开前台查看 1 小时计算；不影响访客 10 分钟限时规则"
+                label="每日预计观看时长（分钟）"
+                description="仅用于下方的用量估算，不影响任何实际行为。按你每天大约打开前台看多久填写"
                 value={getSettingValue(settings, 'capacity_daily_view_minutes', String(DEFAULT_DAILY_VIEW_MINUTES))}
                 onChange={(value) => updateSetting('capacity_daily_view_minutes', value)}
                 type="number"
@@ -683,8 +747,8 @@ export default function SettingsGeneral() {
               />
 
               <SettingInput
-                label="采集间隔（秒）"
-                description="Agent 取样频率，单位为秒；有人看时按此频率实时上传，无人看时本地取样并按打包间隔上传"
+                label="有人观看时 · 上报间隔（秒）"
+                description="前台有访客在看时，Agent 每隔多久采集并上报一次。只在有人看的时候生效，越小越实时"
                 value={getSettingValue(settings, 'live_poll_active_interval_sec', String(DEFAULT_ACTIVE_SAMPLE_SEC))}
                 onChange={(value) => updateSetting('live_poll_active_interval_sec', value)}
                 type="number"
@@ -692,35 +756,8 @@ export default function SettingsGeneral() {
                 width="100%"
               />
               <SettingInput
-                label="历史写入间隔（秒）"
-                description="实时数据仍会按采集间隔刷新，但历史记录至少间隔这么久才写入 Supabase"
-                value={getSettingValue(settings, 'record_persist_interval_sec', String(DEFAULT_RECORD_PERSIST_SEC))}
-                onChange={(value) => updateSetting('record_persist_interval_sec', value)}
-                type="number"
-                placeholder="120"
-                width="100%"
-              />
-              <SettingInput
-                label="Ping 采集与写入间隔（秒）"
-                description="统一控制 Ping 任务执行、结果上报和 Supabase 历史快照写入；最低 60 秒"
-                value={getSettingValue(settings, 'ping_record_persist_interval_sec', String(DEFAULT_PING_RECORD_PERSIST_SEC))}
-                onChange={(value) => updateSetting('ping_record_persist_interval_sec', value)}
-                type="number"
-                placeholder="120"
-                width="100%"
-              />
-              <SettingInput
-                label="历史高水位行数（行）"
-                description="records、gpu_records、gpu_snapshots、ping_records、ping_snapshots 接近该行数时暂停历史写入，只保留实时展示，避免 Supabase 存储增长失控"
-                value={getSettingValue(settings, 'record_high_watermark_rows', String(DEFAULT_RECORD_HIGH_WATERMARK_ROWS))}
-                onChange={(value) => updateSetting('record_high_watermark_rows', value)}
-                type="number"
-                placeholder="450000"
-                width="100%"
-              />
-              <SettingInput
-                label="无人看时打包上传间隔（秒）"
-                description="没有有效前台观看者时，按此间隔批量上传已采集的数据，最少 60 秒，单位为秒"
+                label="无人观看时 · 上报间隔（秒）"
+                description="没有访客在看时的上报间隔，最少 60 秒。绝大多数时间跑的是这一档，它才是实际的采集频率；当前每次上报 1 条，不打包"
                 value={getSettingValue(settings, 'live_poll_idle_interval_sec', String(DEFAULT_IDLE_UPLOAD_SEC))}
                 onChange={(value) => updateSetting('live_poll_idle_interval_sec', value)}
                 type="number"
@@ -728,12 +765,57 @@ export default function SettingsGeneral() {
                 width="100%"
               />
               <SettingInput
-                label="连接保活时长（秒）"
-                description="每个观看连接的实时刷新有效期，过期后停止实时更新，刷新页面重新计时，单位为秒"
+                label="观看状态保持时长（秒）"
+                description="访客离开页面后，仍按「有人观看」的高频维持多久才降回低频。避免刷新页面时频繁切换档位，与连接本身的保活无关"
                 value={getSettingValue(settings, 'live_poll_active_max_duration_sec', String(DEFAULT_VIEWER_TTL_SEC))}
                 onChange={(value) => updateSetting('live_poll_active_max_duration_sec', value)}
                 type="number"
                 placeholder="120"
+                width="100%"
+              />
+              <SettingInput
+                label="历史落库最小间隔（秒）"
+                description="两次写入历史之间至少要隔多久，是一道节流下限而非固定频率。实际写入频率 = 本项与上方「上报间隔」中较大的那个——比它小的设置不会生效"
+                value={getSettingValue(settings, 'record_persist_interval_sec', String(DEFAULT_RECORD_PERSIST_SEC))}
+                onChange={(value) => updateSetting('record_persist_interval_sec', value)}
+                type="number"
+                placeholder="30"
+                width="100%"
+              />
+              <SettingInput
+                label="Ping 探测与落库间隔（秒）"
+                description="Agent 执行延迟探测的间隔，同时也是 Ping 记录写入历史的间隔；最低 60 秒。与上面的监控落库间隔互相独立"
+                value={getSettingValue(settings, 'ping_record_persist_interval_sec', String(DEFAULT_PING_RECORD_PERSIST_SEC))}
+                onChange={(value) => updateSetting('ping_record_persist_interval_sec', value)}
+                type="number"
+                placeholder="120"
+                width="100%"
+              />
+              <SettingInput
+                label="历史有效数据预算（字节）"
+                description="当前有效历史数据及索引预留的估算达到该值后暂停历史写入，实时展示继续。它不等于物理文件大小；默认 400MiB，给其他数据留余量"
+                value={getSettingValue(settings, 'record_high_watermark_bytes', String(DEFAULT_RECORD_HIGH_WATERMARK_BYTES))}
+                onChange={(value) => updateSetting('record_high_watermark_bytes', value)}
+                type="number"
+                placeholder="419430400"
+                width="100%"
+              />
+              <SettingInput
+                label="历史写入熔断行数（行）"
+                description="次要熔断线，与容量熔断谁先到谁生效。行数只是容量的粗糙代理且不含索引开销，一般不需要改动"
+                value={getSettingValue(settings, 'record_high_watermark_rows', String(DEFAULT_RECORD_HIGH_WATERMARK_ROWS))}
+                onChange={(value) => updateSetting('record_high_watermark_rows', value)}
+                type="number"
+                placeholder="700000"
+                width="100%"
+              />
+              <SettingInput
+                label="离线确认轮数（轮）"
+                description="连续多少轮判定为离线才真正发出告警，任意一轮判定在线立即清零。定时任务每 2 分钟一轮，默认 3 轮约等于持续 6 分钟离线才告警，用于挡掉瞬时抖动造成的误报"
+                value={getSettingValue(settings, 'offline_confirm_rounds', String(DEFAULT_OFFLINE_CONFIRM_ROUNDS))}
+                onChange={(value) => updateSetting('offline_confirm_rounds', value)}
+                type="number"
+                placeholder="3"
                 width="100%"
               />
             </div>
@@ -748,11 +830,11 @@ export default function SettingsGeneral() {
                     <Text id="general-settings-calculated-title" size="2" weight="bold">用量实时估算</Text>
                   </Flex>
                   <Text size="1" color="gray" className="quota-reference-line">
-                    历史存储按 Supabase 项目容量估算；Worker Free {formatInteger(derived.workerFreeDailyRequests)}/天，Paid {formatInteger(derived.workerPaidDailyRequests)}/天。
+                    历史存储按 Supabase 项目容量估算；Worker Free {formatInteger(derived.workerFreeDailyRequests)}/天，Paid {formatInteger(derived.workerPaidMonthlyRequests)}/月；月度按 {derived.comparisonMonthDays} 天比较。
                   </Text>
                 </Flex>
                 <Flex align="center" gap="2" wrap="wrap" className="quota-estimate-actions">
-                  <Badge variant="soft" color={getPercentTone(Math.max(derived.storagePercent, derived.highWatermarkPercent, derived.mixedWorkerPercent))}>
+                  <Badge variant="soft" color={derived.freeTierExceeded ? 'red' : getPercentTone(Math.max(derived.storagePercent, derived.highWatermarkPercent, derived.mixedWorkerPercent))}>
                     当前输入即时估算
                   </Badge>
                   <Button size="1" variant="soft" onClick={() => setExplainDialog('cleanup')} disabled={cleaning}>
@@ -765,17 +847,28 @@ export default function SettingsGeneral() {
               </Flex>
               <div className="quota-estimate-bar-grid">
                 <QuotaBar
-                  label="历史存储"
+                  label="保留策略预计存储"
                   value={formatBytes(derived.estimatedStorageBytes)}
                   percent={derived.storagePercent}
                   caption={`Supabase Free 存储参考 ${formatBytes(derived.freeStorageBytes)}，Pro 参考 ${formatBytes(derived.supabaseProStorageReferenceBytes)}`}
                   icon={<Database size={15} />}
                 />
                 <QuotaBar
+                  label="当前有效数据预算（估算）"
+                  value={derived.hasHistoryBytes
+                    ? `${formatBytes(derived.historyLiveBytes)} / ${formatBytes(derived.recordHighWatermarkBytes)}`
+                    : `— / ${formatBytes(derived.recordHighWatermarkBytes)}`}
+                  percent={derived.highWatermarkBytesPercent}
+                  caption={derived.hasHistoryBytes
+                    ? '有效历史数据与索引预留估算；达到后暂停历史写入。物理分配单独显示'
+                    : '有效数据估算暂未读取；不能用物理文件大小代替'}
+                  icon={<Database size={15} />}
+                />
+                <QuotaBar
                   label="历史高水位"
                   value={`${formatInteger(derived.estimatedRowsRetained)} / ${formatInteger(derived.recordHighWatermarkRows)}`}
                   percent={derived.highWatermarkPercent}
-                  caption="接近高水位会暂停历史写入，实时展示继续工作"
+                  caption="次要熔断线，与容量熔断谁先到谁生效"
                   icon={<HardDrive size={15} />}
                 />
                 <QuotaBar
@@ -787,12 +880,16 @@ export default function SettingsGeneral() {
                 />
                 <QuotaBar
                   label="Worker Paid"
-                  value={formatInteger(derived.mixedWorkerRequestsPerDay)}
+                  value={formatInteger(derived.mixedWorkerRequestsPerMonth)}
                   percent={derived.mixedPaidWorkerPercent}
-                  caption={`Paid 参考 ${formatInteger(derived.workerPaidDailyRequests)} 请求/天`}
+                  caption={`按 ${derived.comparisonMonthDays} 天预计；Paid 包含 ${formatInteger(derived.workerPaidMonthlyRequests)} 请求/月，超出另计费`}
                   icon={<Server size={15} />}
                 />
               </div>
+              <CapacityResources resources={derived.resourceEstimates} comparisonMonthDays={derived.comparisonMonthDays} />
+              <Text as="p" size="1" color="gray">
+                历史表物理分配：{derived.hasAllocatedBytes ? formatBytes(derived.historyAllocatedBytes) : '未读取'}。删除后未必缩小；可复用空间尚无法精确测量。平台实际配额以 Supabase 控制台为准。
+              </Text>
               <div className="quota-estimate-metric-grid">
                 <div className="quota-estimate-metric-column quota-estimate-metric-column-short">
                   <EstimateMetric label="节点数" value={formatInteger(derived.clients)} density="short" />

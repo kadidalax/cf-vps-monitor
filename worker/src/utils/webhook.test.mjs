@@ -210,3 +210,26 @@ const retryResult = await sendWebhookMessage(
 );
 assert.equal(retryCalls.length, 3);
 assert.equal(retryResult.ok, true);
+
+// 自指拦截：webhook 指向本站会让告警绕回自己——Worker 收到自己发的请求，
+// 轻则把 404 记成一次发送失败再写一条健康 error，重则在告警风暴里自激。
+assert.equal(
+  validateWebhookUrl('https://monitor.example.com/api/hook', 'monitor.example.com').error,
+  'self_host',
+);
+// 大小写与首尾空白不该成为绕过通道
+assert.equal(
+  validateWebhookUrl('https://Monitor.Example.COM/api/hook', '  monitor.example.com  ').error,
+  'self_host',
+);
+// 外部地址仍然放行
+assert.equal(validateWebhookUrl('https://hooks.example.com/hook', 'monitor.example.com').ok, true);
+// 子域名不是本站，不拦
+assert.equal(validateWebhookUrl('https://hooks.monitor.example.com/h', 'monitor.example.com').ok, true);
+// 不传 selfHost 时行为与改动前完全一致
+assert.equal(validateWebhookUrl('https://monitor.example.com/api/hook').ok, true);
+// selfHost 为空串／空白时视同没传，不能因此把所有地址都拦掉
+assert.equal(validateWebhookUrl('https://monitor.example.com/api/hook', '').ok, true);
+assert.equal(validateWebhookUrl('https://monitor.example.com/api/hook', '   ').ok, true);
+// 自指检查排在既有校验之后：不安全主机仍报 unsafe_host，不该被 self_host 盖掉
+assert.equal(validateWebhookUrl('https://127.0.0.1/hook', '127.0.0.1').error, 'unsafe_host');

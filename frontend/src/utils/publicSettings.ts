@@ -46,6 +46,7 @@ let cachedPublicSettings: { value: PublicSettings; expiresAt: number } | null = 
 let inflightPublicSettings: Promise<PublicSettings> | null = null;
 /** 在途请求是否以 force 发起；force 调用只能复用同样 force 的在途请求。 */
 let inflightPublicSettingsIsForced = false;
+let publicSettingsGeneration = 0;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -108,6 +109,7 @@ export function normalizePublicSettings(payload: unknown): PublicSettings | null
 }
 
 export function setCachedPublicSettings(settings: PublicSettings): void {
+  publicSettingsGeneration += 1;
   cachedPublicSettings = {
     value: settings,
     expiresAt: Date.now() + PUBLIC_SETTINGS_CACHE_MS,
@@ -115,7 +117,10 @@ export function setCachedPublicSettings(settings: PublicSettings): void {
 }
 
 export function clearCachedPublicSettings(): void {
+  publicSettingsGeneration += 1;
   cachedPublicSettings = null;
+  inflightPublicSettings = null;
+  inflightPublicSettingsIsForced = false;
 }
 
 export async function fetchPublicSettings(options: { force?: boolean; signal?: AbortSignal } = {}): Promise<PublicSettings> {
@@ -129,12 +134,13 @@ export async function fetchPublicSettings(options: { force?: boolean; signal?: A
   }
 
   const publicSettingsUrl = options.force ? `/api/public?v=${Date.now()}` : '/api/public';
+  const generation = ++publicSettingsGeneration;
   const promise = fetchWithBootstrapRetry(publicSettingsUrl, { signal: options.signal })
     .then(async (res) => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const settings = normalizePublicSettings(await res.json());
       if (settings) {
-        setCachedPublicSettings(settings);
+        if (generation === publicSettingsGeneration) setCachedPublicSettings(settings);
         return settings;
       }
       throw new Error('Invalid public settings response');

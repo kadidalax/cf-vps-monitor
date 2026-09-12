@@ -4,12 +4,12 @@ import { Box, Button, Flex, Text } from '@radix-ui/themes';
 import { Download, RotateCcw, Save, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
-import { useApi } from '../../contexts/AuthContext';
+import { useApi, useApiResponse } from '../../contexts/AuthContext';
 import { SettingCard, SettingInput } from '../../components/admin/SettingCard';
 import { getChangedSettings, type SettingsMap } from '../../utils/settingsDiff';
 import { requestPassword } from '../../utils/reauth';
 import { notifyPublicDataUpdated } from '../../utils/publicDataEvents';
-import { buildApiRequest } from '../../utils/api';
+import { clearCachedPublicSettings } from '../../utils/publicSettings';
 import type { SettingsLayoutOutletContext } from './SettingsLayout';
 
 const MIN_BACKUP_PASSWORD_LENGTH = 6;
@@ -22,28 +22,42 @@ function backupEncryptPasswordError(password: string): string | null {
 
 export default function SettingsSite() {
   const apiFetch = useApi();
-  const { setAction, settingsCache, loadSettingsScope, setSettingsScope } = useOutletContext<SettingsLayoutOutletContext>();
+  const apiResponseFetch = useApiResponse();
+  const { setAction, settingsCache, loadSettingsScope, setSettingsScope, invalidateSettingsScopes } = useOutletContext<SettingsLayoutOutletContext>();
   const [settings, setSettings] = useState<SettingsMap>(() => settingsCache.site || {});
   const [originalSettings, setOriginalSettings] = useState<SettingsMap>(() => settingsCache.site || {});
   const [loading, setLoading] = useState(!settingsCache.site);
+  const [settingsReady, setSettingsReady] = useState(Boolean(settingsCache.site));
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const [saving, setSaving] = useState(false);
   const [logoSaving, setLogoSaving] = useState(false);
   const logoInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
     loadSettingsScope('site')
       .then((nextSettings) => {
+        if (cancelled) return;
         setSettings(nextSettings);
         setOriginalSettings(nextSettings);
+        setSettingsReady(true);
       })
-      .finally(() => setLoading(false));
-  }, [loadSettingsScope]);
+      .catch((error: unknown) => {
+        if (!cancelled) setLoadError(error instanceof Error ? error.message : '读取设置失败');
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [loadSettingsScope, reloadKey]);
 
   const updateSetting = (key: string, value: string) => {
     setSettings((prev) => ({ ...prev, [key]: value }));
   };
 
   const handleSave = useCallback(async () => {
+    if (!settingsReady || loading || loadError || saving) return;
     const changedSettings = getChangedSettings(settings, originalSettings);
     if (Object.keys(changedSettings).length === 0) {
       toast.info('没有需要保存的改动');
@@ -58,7 +72,7 @@ export default function SettingsSite() {
       });
       if (result.success) {
         setOriginalSettings((prev) => ({ ...prev, ...changedSettings }));
-        setSettingsScope('site', { ...settings, ...changedSettings });
+        setSettingsScope('site', confirmed => ({ ...confirmed, ...changedSettings }));
         notifyPublicDataUpdated();
         toast.success('设置已保存');
       } else {
@@ -69,13 +83,13 @@ export default function SettingsSite() {
     } finally {
       setSaving(false);
     }
-  }, [apiFetch, originalSettings, setSettingsScope, settings]);
+  }, [apiFetch, originalSettings, setSettingsScope, settings, settingsReady, loading, loadError, saving]);
 
   const headerAction = useMemo(() => (
-    <Button onClick={handleSave} disabled={loading || saving}>
+    <Button onClick={handleSave} disabled={!settingsReady || loading || Boolean(loadError) || saving}>
       <Save size={16} /> {saving ? '保存中…' : '保存'}
     </Button>
-  ), [handleSave, loading, saving]);
+  ), [handleSave, settingsReady, loading, loadError, saving]);
 
   useEffect(() => {
     setAction(headerAction);
@@ -83,16 +97,10 @@ export default function SettingsSite() {
   }, [headerAction, setAction]);
 
   const downloadBackupFile = async (filename: string, backupPassword: string) => {
-    const { url: requestUrl, init } = buildApiRequest('/admin/download/backup', {
+    const response = await apiResponseFetch('/admin/download/backup', {
       method: 'POST',
       body: JSON.stringify({ backup_password: backupPassword }),
     });
-    const response = await fetch(requestUrl, init);
-    if (!response.ok) {
-      const error = await response.json().catch(() => null);
-      throw new Error(error?.error || '下载失败');
-    }
-
     const blob = await response.blob();
     const blobUrl = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -138,7 +146,12 @@ export default function SettingsSite() {
         },
       );
       if (!beforeRestorePassword) return;
-      await downloadBackupFile(`cf-monitor-before-restore-${new Date().toISOString().slice(0, 10)}.json`, beforeRestorePassword);
+      try {
+        await downloadBackupFile(`cf-monitor-before-restore-${new Date().toISOString().slice(0, 10)}.json`, beforeRestorePassword);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '无法下载当前配置';
+        if (!window.confirm(`恢复前自动备份失败：${message}\n\n继续恢复会覆盖当前配置，且无法用本次自动备份撤回。是否继续恢复？`)) return;
+      }
       const result = await apiFetch('/admin/upload/backup?confirm_restore=true&acknowledge_overwrite=true', {
         method: 'POST',
         body: JSON.stringify({
@@ -155,7 +168,10 @@ export default function SettingsSite() {
       }
 
       toast.success('备份已恢复');
-      const nextSettings = await apiFetch('/admin/settings?scope=site');
+      invalidateSettingsScopes();
+      clearCachedPublicSettings();
+      notifyPublicDataUpdated({ force: true });
+      const nextSettings = await loadSettingsScope('site');
       if (nextSettings && typeof nextSettings === 'object') {
         setSettings(nextSettings as SettingsMap);
         setOriginalSettings(nextSettings as SettingsMap);
@@ -190,7 +206,7 @@ export default function SettingsSite() {
       const siteLogoUrl = typeof result.site_logo_url === 'string' ? result.site_logo_url : '';
       setSettings((prev) => ({ ...prev, site_logo_url: siteLogoUrl }));
       setOriginalSettings((prev) => ({ ...prev, site_logo_url: siteLogoUrl }));
-      setSettingsScope('site', { ...settings, site_logo_url: siteLogoUrl });
+      setSettingsScope('site', confirmed => ({ ...confirmed, site_logo_url: siteLogoUrl }));
       notifyPublicDataUpdated();
       toast.success('Logo 已上传');
     } catch (error) {
@@ -207,7 +223,7 @@ export default function SettingsSite() {
       await apiFetch('/admin/site-logo/reset', { method: 'POST' });
       setSettings((prev) => ({ ...prev, site_logo_url: '' }));
       setOriginalSettings((prev) => ({ ...prev, site_logo_url: '' }));
-      setSettingsScope('site', { ...settings, site_logo_url: '' });
+      setSettingsScope('site', confirmed => ({ ...confirmed, site_logo_url: '' }));
       notifyPublicDataUpdated();
       toast.success('已恢复默认 Logo');
     } catch (error) {
@@ -219,8 +235,15 @@ export default function SettingsSite() {
 
   if (loading) return <Loading />;
 
+  const loadFailure = loadError && <Flex align="center" gap="2">
+    <Text color="red" role="alert">读取设置失败：{loadError}</Text>
+    <Button variant="soft" onClick={() => setReloadKey(value => value + 1)}>重试</Button>
+  </Flex>;
+  if (!settingsReady) return loadFailure;
+
   return (
     <Flex direction="column" gap="4">
+      {loadFailure}
       <SettingCard title="基本信息" description="站点名称、描述、语言与安装脚本域名" defaultOpen>
         <Box style={{ marginBottom: 16 }}>
           <Text size="2" weight="medium" style={{ display: 'block', marginBottom: 4 }}>站点 Logo</Text>

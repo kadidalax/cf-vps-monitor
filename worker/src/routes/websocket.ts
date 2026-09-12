@@ -109,6 +109,7 @@ async function syncAgentNetworkMetadata(c: WsContext, client: db.ClientIdentity,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
+      source: 'agent',
       uuid: client.uuid,
       name: client.name || client.uuid,
       hidden: client.hidden,

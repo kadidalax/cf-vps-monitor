@@ -99,8 +99,8 @@ export async function apiFetch<T = any>(
   return res.json();
 }
 
-export async function publicFetch<T = any>(path: string): Promise<T> {
-  const res = await fetchWithBootstrapRetry(withApiBase(path));
+export async function publicFetch<T = any>(path: string, options: RequestInit = {}): Promise<T> {
+  const res = await fetchWithBootstrapRetry(withApiBase(path), options);
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(errBody.error || `HTTP ${res.status}`);

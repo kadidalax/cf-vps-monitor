@@ -34,7 +34,7 @@ import {
   TextField,
   Tooltip,
 } from '@radix-ui/themes';
-import { ExternalLink, Eye, EyeOff, Globe2, GripVertical, Pencil, Plus, Power, RefreshCw, Save, Search, Trash2 } from 'lucide-react';
+import { ExternalLink, Eye, EyeOff, Globe2, Grip, Pencil, Plus, Power, RefreshCw, Save, Search, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import WebsiteHeartbeatBar from '../../components/WebsiteHeartbeatBar';
@@ -208,7 +208,7 @@ function SortableWebsiteRow({ monitor, selected, dragDisabled, onSelect, onCheck
               {...attributes}
               {...listeners}
             >
-              <GripVertical size={15} />
+              <Grip size={15} />
             </button>
           </Tooltip>
           <Checkbox className="admin-node-checkbox" checked={selected} onCheckedChange={() => onSelect(monitor.id)} />
@@ -277,7 +277,7 @@ function SortableWebsiteCard({ monitor, selected, dragDisabled, onSelect, onChec
                 {...attributes}
                 {...listeners}
               >
-                <GripVertical size={15} />
+                <Grip size={15} />
               </button>
             </Tooltip>
             <Checkbox className="admin-node-checkbox" checked={selected} onCheckedChange={() => onSelect(monitor.id)} />
@@ -296,10 +296,10 @@ function SortableWebsiteCard({ monitor, selected, dragDisabled, onSelect, onChec
           </div>
 
           <Flex className="admin-row-actions">
-            <Tooltip content="检测"><IconButton size="1" variant="soft" onClick={() => onCheck(monitor)}><RefreshCw size={13} /></IconButton></Tooltip>
+            <Tooltip content="检测"><IconButton size="1" variant="soft" aria-label={`检测 ${monitor.name}`} onClick={() => onCheck(monitor)}><RefreshCw size={13} aria-hidden="true" /></IconButton></Tooltip>
             <Tooltip content={monitor.enabled ? '停用' : '启用'}><IconButton size="1" variant="soft" onClick={() => onEnabled(monitor, !monitor.enabled)} aria-label={monitor.enabled ? '停用' : '启用'}><Power size={13} /></IconButton></Tooltip>
-            <Tooltip content="编辑"><IconButton size="1" variant="soft" onClick={() => onEdit(monitor)}><Pencil size={13} /></IconButton></Tooltip>
-            <Tooltip content="删除"><IconButton size="1" color="red" variant="soft" onClick={() => onRemove(monitor)}><Trash2 size={13} /></IconButton></Tooltip>
+            <Tooltip content="编辑"><IconButton size="1" variant="soft" aria-label={`编辑 ${monitor.name}`} onClick={() => onEdit(monitor)}><Pencil size={13} aria-hidden="true" /></IconButton></Tooltip>
+            <Tooltip content="删除"><IconButton size="1" color="red" variant="soft" aria-label={`删除 ${monitor.name}`} onClick={() => onRemove(monitor)}><Trash2 size={13} aria-hidden="true" /></IconButton></Tooltip>
           </Flex>
         </div>
 
@@ -333,12 +333,25 @@ function SortableWebsiteCard({ monitor, selected, dragDisabled, onSelect, onChec
 
 export default function AdminWebsites() {
   const apiFetch = useApi();
+  const monitorsLoadRef = useRef<Promise<void> | null>(null);
+  const monitorsMountedRef = useRef(false);
+  const monitorsReadRef = useRef(0);
+  const monitorOrderRef = useRef(0);
+  const monitorUpdatesRef = useRef<Array<(current: WebsiteMonitor[]) => WebsiteMonitor[]> | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [monitors, setMonitors] = useState<WebsiteMonitor[]>([]);
+  const updateMonitors = (update: WebsiteMonitor[] | ((current: WebsiteMonitor[]) => WebsiteMonitor[])) => {
+    if (!monitorsMountedRef.current) return;
+    const apply = typeof update === 'function' ? update : () => update;
+    monitorUpdatesRef.current?.push(apply);
+    setMonitors(apply);
+  };
   const [clients, setClients] = useState<ClientLite[]>([]);
   const [clientsLoaded, setClientsLoaded] = useState(false);
   const [checks, setChecks] = useState<WebsiteCheck[]>([]);
+  const checksOwnerRef = useRef<{ id: number } | null>(null);
+  const checksRequestRef = useRef(0);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<WebsiteStatusFilter>('all');
   const [sortKey, setSortKey] = useState<WebsiteSortKey>('manual');
@@ -388,15 +401,50 @@ export default function AdminWebsites() {
     hidden: monitors.filter((monitor) => monitor.hidden).length,
   }), [monitors]);
 
-  const loadMonitors = async (refresh = false) => {
-    const data = await apiFetch(refresh ? '/admin/websites?refresh=1' : '/admin/websites');
-    const list = Array.isArray(data) ? data as WebsiteMonitor[] : [];
-    setMonitors(list);
+  const loadMonitors = (refresh = false): Promise<void> => {
+    if (!refresh && monitorsLoadRef.current) return monitorsLoadRef.current;
+    const revision = ++monitorsReadRef.current;
+    const updates: Array<(current: WebsiteMonitor[]) => WebsiteMonitor[]> = [];
+    monitorUpdatesRef.current = updates;
+    const isCurrent = () => monitorsMountedRef.current && monitorsReadRef.current === revision;
+    const request = apiFetch(refresh ? '/admin/websites?refresh=1' : '/admin/websites')
+      .then((data) => {
+        const list = Array.isArray(data) ? data as WebsiteMonitor[] : [];
+        if (isCurrent()) setMonitors(updates.reduce((current, update) => update(current), list));
+      })
+      .catch((error: unknown) => { if (isCurrent()) throw error; })
+      .finally(() => {
+        if (isCurrent()) {
+          monitorsLoadRef.current = null;
+          monitorUpdatesRef.current = null;
+          setLoading(false);
+        }
+      });
+    monitorsLoadRef.current = request;
+    return request;
   };
 
   const loadChecks = async (id: number) => {
-    const data = await apiFetch(`/admin/websites/${id}/checks?limit=60`);
-    setChecks(Array.isArray(data) ? data as WebsiteCheck[] : []);
+    const owner = checksOwnerRef.current;
+    if (!owner || owner.id !== id) return;
+    const request = ++checksRequestRef.current;
+    const isCurrent = () => monitorsMountedRef.current && checksOwnerRef.current === owner && checksRequestRef.current === request;
+    try {
+      const data = await apiFetch(`/admin/websites/${id}/checks?limit=60`);
+      if (isCurrent()) setChecks(Array.isArray(data) ? data as WebsiteCheck[] : []);
+    } catch (error) {
+      if (!isCurrent()) return;
+      setChecks([]);
+      toast.error(error instanceof Error ? error.message : '检测历史加载失败');
+    }
+  };
+
+  const changeEditOpen = (open: boolean) => {
+    if (!open) {
+      checksOwnerRef.current = null;
+      checksRequestRef.current += 1;
+    }
+    setEditOpen(open);
   };
 
   const ensureClients = async () => {
@@ -409,23 +457,46 @@ export default function AdminWebsites() {
   };
 
   useEffect(() => {
+    monitorsMountedRef.current = true;
     loadMonitors()
-      .catch((error: unknown) => toast.error(error instanceof Error ? error.message : '加载失败'))
-      .finally(() => setLoading(false));
+      .catch((error: unknown) => toast.error(error instanceof Error ? error.message : '加载失败'));
     const unsubscribe = subscribeWebsiteMonitorsUpdated((detail) => {
       if (detail && detail !== true) {
-        setMonitors((current) => applyWebsiteMonitorUpdate(current, detail) || current);
+        updateMonitors((current) => applyWebsiteMonitorUpdate(current, detail) || current);
         return;
       }
       loadMonitors(true).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '加载失败'));
     });
-    return unsubscribe;
+    const refreshVisible = () => {
+      if (document.hidden) return;
+      void loadMonitors(true).catch((error: unknown) => toast.error(error instanceof Error ? error.message : '加载失败'));
+    };
+    const refreshTimer = window.setInterval(refreshVisible, 120_000);
+    window.addEventListener('focus', refreshVisible);
+    document.addEventListener('visibilitychange', refreshVisible);
+    return () => {
+      monitorsMountedRef.current = false;
+      monitorsReadRef.current += 1;
+      monitorsLoadRef.current = null;
+      monitorUpdatesRef.current = null;
+      unsubscribe();
+      window.clearInterval(refreshTimer);
+      window.removeEventListener('focus', refreshVisible);
+      document.removeEventListener('visibilitychange', refreshVisible);
+    };
   }, []);
 
   useEffect(() => {
-    if (!editMonitor) return;
-    loadChecks(editMonitor.id).catch(() => setChecks([]));
-  }, [editMonitor?.id]);
+    if (!editOpen || !editMonitor) return;
+    const owner = { id: editMonitor.id };
+    checksOwnerRef.current = owner;
+    setChecks([]);
+    void loadChecks(owner.id);
+    return () => {
+      if (checksOwnerRef.current === owner) checksOwnerRef.current = null;
+      checksRequestRef.current += 1;
+    };
+  }, [editOpen, editMonitor?.id]);
 
   useEffect(() => {
     const media = window.matchMedia('(max-width: 760px)');
@@ -457,6 +528,9 @@ export default function AdminWebsites() {
   };
 
   const openEdit = (monitor: WebsiteMonitor | null) => {
+    checksOwnerRef.current = null;
+    checksRequestRef.current += 1;
+    setChecks([]);
     ensureClients().catch((error: unknown) => toast.error(error instanceof Error ? error.message : '服务列表加载失败'));
     setEditMonitor(monitor);
     setForm(monitor ? {
@@ -476,7 +550,6 @@ export default function AdminWebsites() {
       agent_probe_limit: monitor.agent_probe_limit || 3,
       agent_probe_status_enabled: Boolean(monitor.agent_probe_status_enabled),
     } : emptyForm);
-    if (!monitor) setChecks([]);
     setEditOpen(true);
   };
 
@@ -504,7 +577,7 @@ export default function AdminWebsites() {
         : await apiFetch('/admin/websites/add', { method: 'POST', body: JSON.stringify(payload) });
       assertSuccess(result, '保存失败');
       const savedMonitor = (result as { monitor?: WebsiteMonitor }).monitor;
-      setMonitors((current) => {
+      updateMonitors((current) => {
         if (editMonitor) {
           return current.map((monitor) => monitor.id === editMonitor.id
             ? { ...monitor, ...(savedMonitor || payload) }
@@ -513,7 +586,7 @@ export default function AdminWebsites() {
         return savedMonitor ? [...current, savedMonitor] : current;
       });
       toast.success(editMonitor ? '已保存' : '已添加');
-      setEditOpen(false);
+      changeEditOpen(false);
       notifyWebsiteMonitorsUpdated(savedMonitor ? { upsert: [savedMonitor] } : true);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '保存失败');
@@ -528,7 +601,7 @@ export default function AdminWebsites() {
       body: JSON.stringify({ id: monitor.id, hidden }),
     });
     assertSuccess(result, '设置失败');
-    setMonitors((current) => current.map((item) => item.id === monitor.id ? { ...item, hidden } : item));
+    updateMonitors((current) => current.map((item) => item.id === monitor.id ? { ...item, hidden } : item));
     notifyWebsiteMonitorsUpdated({ upsert: [{ ...monitor, hidden }] });
   };
 
@@ -538,7 +611,7 @@ export default function AdminWebsites() {
       body: JSON.stringify({ id: monitor.id, enabled }),
     });
     assertSuccess(result, '设置失败');
-    setMonitors((current) => current.map((item) => item.id === monitor.id
+    updateMonitors((current) => current.map((item) => item.id === monitor.id
       ? { ...item, enabled, status: enabled && item.status === 'paused' ? 'pending' : !enabled ? 'paused' : item.status }
       : item));
     notifyWebsiteMonitorsUpdated({ upsert: [{ ...monitor, enabled, status: enabled && monitor.status === 'paused' ? 'pending' : !enabled ? 'paused' : monitor.status }] });
@@ -568,7 +641,7 @@ export default function AdminWebsites() {
       toast.success(`已${hidden ? '隐藏' : '公开'} ${targets.length} 个网站`);
       setSelectedWebsites([]);
       const ids = new Set(targets.map((monitor) => monitor.id));
-      setMonitors((current) => current.map((monitor) => ids.has(monitor.id) ? { ...monitor, hidden } : monitor));
+      updateMonitors((current) => current.map((monitor) => ids.has(monitor.id) ? { ...monitor, hidden } : monitor));
       notifyWebsiteMonitorsUpdated({
         upsert: targets.map((monitor) => ({ ...monitor, hidden })),
       });
@@ -590,20 +663,28 @@ export default function AdminWebsites() {
       ...monitor,
       sort_order: index + 1,
     }));
-    setMonitors(nextMonitors);
+    const orderRequest = ++monitorOrderRef.current;
+    const applyOrder = (order: WebsiteMonitor[]) => (current: WebsiteMonitor[]) => {
+      const positions = new Map(order.map((monitor, index) => [monitor.id, index]));
+      return [...current].sort((a, b) => (positions.get(a.id) ?? current.length) - (positions.get(b.id) ?? current.length));
+    };
+    updateMonitors(applyOrder(nextMonitors));
 
     try {
       const result = await apiFetch('/admin/websites/reorder', {
         method: 'POST',
         body: JSON.stringify({ ids: nextMonitors.map((monitor) => monitor.id) }),
       });
+      if (monitorOrderRef.current !== orderRequest) return;
       assertSuccess(result, '排序失败');
       toast.success('网站排序已更新');
+      updateMonitors(applyOrder(nextMonitors));
       notifyWebsiteMonitorsUpdated({ upsert: nextMonitors, reorder: nextMonitors.map((monitor) => monitor.id) });
     } catch (error) {
+      if (monitorOrderRef.current !== orderRequest) return;
       toast.error(error instanceof Error ? error.message : '排序失败');
-      setMonitors(previousMonitors);
-      await loadMonitors();
+      updateMonitors(applyOrder(previousMonitors));
+      await loadMonitors(true);
     }
   };
 
@@ -613,9 +694,9 @@ export default function AdminWebsites() {
       const result = await apiFetch('/admin/websites/delete', { method: 'POST', body: JSON.stringify({ id: monitor.id }) });
       assertSuccess(result, '删除失败');
       toast.success('已删除');
-      setEditOpen(false);
+      changeEditOpen(false);
       setDeleteMonitor(null);
-      setMonitors((current) => current.filter((item) => item.id !== monitor.id));
+      updateMonitors((current) => current.filter((item) => item.id !== monitor.id));
       setSelectedWebsites((current) => current.filter((id) => id !== monitor.id));
       notifyWebsiteMonitorsUpdated({ remove: [monitor.id] });
     } finally {
@@ -624,14 +705,15 @@ export default function AdminWebsites() {
   };
 
   const checkNow = async (monitor: WebsiteMonitor) => {
+    const historyOwner = checksOwnerRef.current;
     const result = await apiFetch(`/admin/websites/${monitor.id}/check`, { method: 'POST', body: JSON.stringify({}) });
     assertSuccess(result, '检测失败');
     const updatedMonitor = (result as { monitor?: WebsiteMonitor }).monitor;
     if (updatedMonitor) {
-      setMonitors((current) => current.map((item) => item.id === updatedMonitor.id ? { ...item, ...updatedMonitor } : item));
+      updateMonitors((current) => current.map((item) => item.id === updatedMonitor.id ? { ...item, ...updatedMonitor } : item));
     }
     toast.success('检测完成');
-    await loadChecks(monitor.id);
+    if (historyOwner?.id === monitor.id && checksOwnerRef.current === historyOwner) await loadChecks(monitor.id);
     notifyWebsiteMonitorsUpdated(updatedMonitor ? { upsert: [updatedMonitor] } : true);
   };
 
@@ -794,7 +876,7 @@ export default function AdminWebsites() {
         </Dialog.Content>
       </Dialog.Root>
 
-      <Dialog.Root open={editOpen} onOpenChange={setEditOpen}>
+      <Dialog.Root open={editOpen} onOpenChange={changeEditOpen}>
         <Dialog.Content
           ref={editDialogRef}
           tabIndex={-1}
@@ -888,7 +970,7 @@ export default function AdminWebsites() {
             {editMonitor && <WebsiteHeartbeatBar checks={checks} max={60} />}
             <Flex gap="2" justify="end" wrap="wrap">
               <Flex gap="2">
-                <Button variant="soft" color="gray" onClick={() => setEditOpen(false)}>取消</Button>
+                <Button variant="soft" color="gray" onClick={() => changeEditOpen(false)}>取消</Button>
                 <Button onClick={save} disabled={saving}><Save size={16} />{saving ? '保存中' : '保存'}</Button>
               </Flex>
             </Flex>

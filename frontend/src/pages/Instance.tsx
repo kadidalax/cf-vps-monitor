@@ -18,12 +18,15 @@ import { useAuth } from '../contexts/AuthContext';
 import { publicFetch } from '../utils/api';
 import { normalizePublicClients } from '../utils/publicClients';
 import {
+  collectCursorHistory,
   normalizePublicGpuRecords,
   normalizePublicMonitorRecords,
   type PublicGpuRecord,
   type PublicMonitorRecord,
 } from '../utils/publicHistory';
-import type { ClientInfo } from '../types';
+import type { ClientInfo, LiveDataMap } from '../types';
+import { formatLastReport, formatMetricUptime, getNodeDisplayRecord, getNodeLastReportTime, getNodeStatus } from '../utils/nodeMetrics';
+import { filterMonitorNodes } from '../utils/monitorView';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Area, AreaChart
@@ -40,23 +43,13 @@ import {
 } from '../utils/pingChart';
 import { buildMonitorChartData, getMonitorChartRenderData } from '../utils/monitorChartData';
 import { monitorYAxisProps, pingYAxisProps, wideYAxisProps } from '../utils/monitorChartAxis';
+import { chartTooltipProps } from '../utils/chartTooltip';
 
 const formatSpeed = (bytes: number): string => {
   if (!bytes || bytes === 0) return '0 B/s';
   const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
   const i = Math.floor(Math.log(bytes) / Math.log(1024));
   return `${(bytes / Math.pow(1024, i)).toFixed(i >= 2 ? 1 : 0)} ${units[i]}`;
-};
-
-const formatUptime = (seconds: number): string => {
-  if (!seconds || seconds < 0) return '0s';
-  const d = Math.floor(seconds / 86400);
-  const h = Math.floor((seconds % 86400) / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  if (d > 0) return `${d}d ${h}h ${m}m`;
-  if (h > 0) return `${h}h ${m}m ${s}s`;
-  return `${m}m ${s}s`;
 };
 
 type TimeRange = '1h' | '4h' | '24h' | '3d';
@@ -103,6 +96,12 @@ export default function Instance() {
   const [records, setRecords] = useState<PublicMonitorRecord[]>([]);
   const [clientLoading, setClientLoading] = useState(true);
   const [recordsLoading, setRecordsLoading] = useState(true);
+  const [recordsError, setRecordsError] = useState<string | null>(null);
+  const [gpuError, setGpuError] = useState<string | null>(null);
+  const [gpuLoading, setGpuLoading] = useState(false);
+  const [gpuRefresh, setGpuRefresh] = useState(0);
+  const clientRequestRef = useRef(0);
+  const recordsRequestRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [chartTab, setChartTab] = useState<ChartTab>('cpu');
   const [timeRange, setTimeRange] = useState<TimeRange>('1h');
@@ -113,16 +112,14 @@ export default function Instance() {
   const [shouldLoadPing, setShouldLoadPing] = useState(false);
   const [gpuRecords, setGpuRecords] = useState<PublicGpuRecord[]>([]);
   const pingSectionRef = useRef<HTMLDivElement | null>(null);
-  const { liveData } = useLiveData();
-  const liveRecord = uuid ? liveData?.data?.[uuid] : undefined;
+  const { liveData, snapshotReady } = useLiveData();
+  const liveView: LiveDataMap = useMemo(() => ({ online: liveData?.online || [], data: liveData?.data || {},
+    clients: liveData?.clients || [], last_known: liveData?.last_known || {}, statusReady: snapshotReady }), [liveData, snapshotReady]);
+  const liveRecord = uuid ? getNodeDisplayRecord(uuid, liveView) : undefined;
+  const nodeStatus = uuid ? getNodeStatus(uuid, liveView) : 'unknown';
   const onlineSet = useMemo(() => new Set(liveData?.online || []), [liveData?.online]);
   const groupedClients = useMemo(() => {
-    const sorted = [...clients].sort((a, b) => {
-      const aOnline = onlineSet.has(a.uuid);
-      const bOnline = onlineSet.has(b.uuid);
-      if (aOnline !== bOnline) return aOnline ? -1 : 1;
-      return (a.name || '').localeCompare(b.name || '');
-    });
+    const sorted = filterMonitorNodes(clients, liveView, { offlinePosition: 'last' });
 
     const groups = new Map<string, ClientInfo[]>();
     sorted.forEach((node) => {
@@ -138,29 +135,42 @@ export default function Instance() {
         return a.localeCompare(b);
       })
       .map(([group, nodes]) => ({ group, nodes }));
-  }, [clients, onlineSet]);
+  }, [clients, liveView]);
 
   // Load public client info.
-  const loadClient = useCallback(async () => {
+  const loadClient = useCallback(async (signal?: AbortSignal) => {
     if (!uuid || authLoading) return;
+    const requestId = ++clientRequestRef.current;
     setClientLoading(true);
+    setClient(null);
     try {
       setError(null);
-      const data = await publicFetch(`/nodes${isAuthenticated ? '?include_hidden=1' : ''}`);
+      const data = await publicFetch(`/nodes${isAuthenticated ? '?include_hidden=1' : ''}`, { signal });
+      if (signal?.aborted || requestId !== clientRequestRef.current) return;
       const visible = normalizePublicClients(data, { includeHidden: isAuthenticated });
       setClients(visible);
       const found = visible.find((c) => c.uuid === uuid) || null;
       if (found) { setClient(found); } else { setError('服务器不存在'); }
-    } catch { setError('加载失败'); }
-    finally { setClientLoading(false); }
+    } catch {
+      if (!signal?.aborted && requestId === clientRequestRef.current) setError('加载失败');
+    } finally {
+      if (!signal?.aborted && requestId === clientRequestRef.current) setClientLoading(false);
+    }
   }, [uuid, authLoading, isAuthenticated]);
 
-  useEffect(() => { loadClient(); }, [loadClient]);
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadClient(controller.signal);
+    return () => { controller.abort(); clientRequestRef.current += 1; };
+  }, [loadClient]);
 
   // Load history records
-  const loadRecords = useCallback(async (range: TimeRange) => {
+  const loadRecords = useCallback(async (range: TimeRange, signal?: AbortSignal) => {
     if (!uuid || authLoading) return;
+    const requestId = ++recordsRequestRef.current;
     setRecordsLoading(true);
+    setRecords([]);
+    setRecordsError(null);
     const endTs = Date.now();
     const startTs = endTs - timeRangeMs[range];
     const start = new Date(startTs).toISOString();
@@ -169,14 +179,22 @@ export default function Instance() {
     setRecordsRangeEnd(endTs);
 
     try {
-      const data = await publicFetch(`/records/load?${historyQuery({ uuid, start, end, cursor: end, limit, include_hidden: isAuthenticated ? 1 : undefined })}`);
-      setRecords(normalizePublicMonitorRecords(data));
-    } catch {}
-    setRecordsLoading(false);
+      const data = await collectCursorHistory(
+        (cursor) => publicFetch(`/records/load?${historyQuery({ uuid, start, end, cursor, limit: Math.min(limit, 500), include_hidden: isAuthenticated ? 1 : undefined })}`, { signal }),
+        { cursor: end, start, end, normalize: normalizePublicMonitorRecords, signal },
+      );
+      if (!signal?.aborted && requestId === recordsRequestRef.current) setRecords(data);
+    } catch {
+      if (!signal?.aborted && requestId === recordsRequestRef.current) setRecordsError('加载监控历史失败，请重试');
+    } finally {
+      if (!signal?.aborted && requestId === recordsRequestRef.current) setRecordsLoading(false);
+    }
   }, [uuid, authLoading, isAuthenticated]);
 
   useEffect(() => {
-    loadRecords(timeRange);
+    const controller = new AbortController();
+    void loadRecords(timeRange, controller.signal);
+    return () => { controller.abort(); recordsRequestRef.current += 1; };
   }, [loadRecords, timeRange]);
 
   useEffect(() => {
@@ -230,38 +248,46 @@ export default function Instance() {
 
   // Load GPU records (only for GPU-capable clients)
   useEffect(() => {
-    if (!uuid || authLoading || !client?.gpu_name) return;
+    if (client && !client.gpu_name) setChartTab(current => current === 'gpu' ? 'cpu' : current);
+  }, [client?.uuid, client?.gpu_name]);
+
+  useEffect(() => {
+    setGpuRecords([]);
+    setGpuError(null);
+    setGpuLoading(false);
+    if (!uuid || authLoading || !client?.gpu_name || client.uuid !== uuid) return;
+    setGpuLoading(true);
+    const controller = new AbortController();
     const endTs = Date.now();
     const startTs = endTs - timeRangeMs[timeRange];
     const start = new Date(startTs).toISOString();
     const end = new Date(endTs).toISOString();
 
-    publicFetch(`/records/gpu?${historyQuery({ uuid, start, end, cursor: end, limit: 200, include_hidden: isAuthenticated ? 1 : undefined })}`)
-      .then((data) => setGpuRecords(normalizePublicGpuRecords(data)))
-      .catch(() => {});
-  }, [uuid, timeRange, client?.gpu_name, authLoading, isAuthenticated]);
+    collectCursorHistory(
+      (cursor) => publicFetch(`/records/gpu?${historyQuery({ uuid, start, end, cursor, limit: 500, include_hidden: isAuthenticated ? 1 : undefined })}`, { signal: controller.signal }),
+      { cursor: end, start, end, normalize: normalizePublicGpuRecords, signal: controller.signal },
+    )
+      .then((data) => { if (!controller.signal.aborted) setGpuRecords(data); })
+      .catch(() => { if (!controller.signal.aborted) setGpuError('加载 GPU 历史失败，请重试'); })
+      .finally(() => { if (!controller.signal.aborted) setGpuLoading(false); });
+    return () => controller.abort();
+  }, [uuid, timeRange, client?.uuid, client?.gpu_name, authLoading, isAuthenticated, gpuRefresh]);
 
   const handleTimeRangeChange = (v: string) => {
     const range = v as TimeRange;
     setTimeRange(range);
+    setRecords([]);
+    setGpuRecords([]);
     setRecordsLoading(true);
   };
 
-  if (clientLoading || (recordsLoading && records.length === 0)) return <Loading />;
+  if (clientLoading || (client && client.uuid !== uuid) || (recordsLoading && records.length === 0)) return <Loading />;
   if (error || !client) return <Text color="red" align="center" style={{ padding: 40 }}>{error || '未找到'}</Text>;
 
   const latestHistory = records.length > 0 ? records[records.length - 1] : null;
-  const liveRecordWithTime = liveRecord as { time?: unknown } | undefined;
-  const latestRecordTime = typeof liveRecordWithTime?.time === 'string'
-    ? liveRecordWithTime.time
-    : new Date(liveData?.timestamp || Date.now()).toISOString();
-  const latest = liveRecord
-    ? ({
-      ...(latestHistory || {}),
-      ...liveRecord,
-      time: latestRecordTime,
-    } as PublicMonitorRecord)
-    : latestHistory;
+  const latest = liveRecord || latestHistory;
+  const latestRecordTime = liveRecord ? getNodeLastReportTime(uuid || '', liveView)
+    : latestHistory ? Date.parse(latestHistory.time) : undefined;
 
   const chartTimeFormatter = (value: unknown) => {
     const dateInput = typeof value === 'string' || typeof value === 'number' || value instanceof Date ? value : '';
@@ -295,6 +321,7 @@ export default function Instance() {
           groups={groupedClients}
           activeUuid={uuid || ''}
           onlineSet={onlineSet}
+          statusReady={snapshotReady}
           liveData={liveData?.data || {}}
           onSelect={(nextUuid) => navigate(`/instance/${nextUuid}`)}
         />
@@ -314,17 +341,18 @@ export default function Instance() {
           <Heading size="5">{client.name}</Heading>
           {client.region && <Badge color="gray"><Globe size={12} /> {client.region}</Badge>}
           {client.group && <Badge color="purple"><Layers size={12} /> {client.group}</Badge>}
-          {latest && (
-            <Badge color="green" variant="solid">
-              <Activity size={12} /> 已运行 {formatUptime(latest.uptime)}
-            </Badge>
-          )}
+          <Badge color={nodeStatus === 'online' ? 'green' : nodeStatus === 'offline' ? 'red' : 'gray'} variant="solid">
+            <Activity size={12} /> {nodeStatus === 'online' ? `在线 · 已运行 ${formatMetricUptime(latest?.uptime)}` : nodeStatus === 'offline' ? '离线' : '确认中'}
+          </Badge>
+          {nodeStatus === 'offline' && <Text size="1" color="gray">最后上报 {formatLastReport(latestRecordTime)} · 上报时已运行 {formatMetricUptime(latest?.uptime)}</Text>}
         </Flex>
-        <DetailsGrid client={client} live={latest} compact remark={client.public_remark} />
+        <DetailsGrid client={client} live={latest || undefined} compact remark={client.public_remark} />
       </Card>
 
       {/* Chart section */}
       <Card mb="4">
+        {recordsError && <Flex align="center" gap="2" mb="2"><Text color="red" role="alert">{recordsError}</Text><Button size="1" variant="soft" onClick={() => void loadRecords(timeRange)}>重试</Button></Flex>}
+        {chartTab === 'gpu' && gpuError && <Flex align="center" gap="2" mb="2"><Text color="red" role="alert">{gpuError}</Text><Button size="1" variant="soft" onClick={() => setGpuRefresh(value => value + 1)}>重试 GPU 历史</Button></Flex>}
         <Flex justify="between" align="center" mb="3" gap="3" wrap="wrap">
           <Text weight="bold">监控图表 · {timeRange === '1h' ? '最近1小时' : timeRange === '4h' ? '最近4小时' : timeRange === '24h' ? '最近24小时' : '最近3天'}</Text>
           <Flex align="center" gap="3" wrap="wrap">
@@ -347,14 +375,23 @@ export default function Instance() {
               <Tabs.Trigger value="connections">连接数</Tabs.Trigger>
               <Tabs.Trigger value="process">进程数</Tabs.Trigger>
               <Tabs.Trigger value="temp">温度</Tabs.Trigger>
-              {client.gpu_name && gpuRecords.length > 0 && (
+              {client.gpu_name && (
                 <Tabs.Trigger value="gpu">GPU</Tabs.Trigger>
               )}
             </Tabs.List>
           </Flex>
 
           <Box pt="3">
-            {chartTab === 'gpu' ? (
+            {chartTab === 'disk' && <Text as="p" size="1" color="gray" mb="2">按上报时间记录，可能包含容器文件占用估算；同一次磁盘采样可出现在多次上报中。</Text>}
+            {(chartTab === 'temp' || chartTab === 'disk') && !recordsLoading && !recordsError && !chartData.some((point) => point[chartTab] !== null) ? (
+              <Flex align="center" justify="center" style={{ height: monitorChartHeight }}>
+                <Text role="status" color="gray">{chartTab === 'temp' ? '温度数据不可用' : '磁盘使用量数据不可用'}</Text>
+              </Flex>
+            ) : chartTab === 'gpu' && gpuLoading ? (
+              <Text role="status" color="gray">正在加载 GPU 历史…</Text>
+            ) : chartTab === 'gpu' && !gpuError && gpuRecords.length === 0 ? (
+              <Text role="status" color="gray">暂无 GPU 历史记录</Text>
+            ) : chartTab === 'gpu' && gpuError ? null : chartTab === 'gpu' ? (
               <ResponsiveContainer width="100%" height={monitorChartHeight}>
                 <LineChart data={gpuChartData} margin={monitorChartMargin}>
                   <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.3} />
@@ -370,6 +407,7 @@ export default function Instance() {
                   />
                   <YAxis {...monitorYAxisProps} domain={[0, 100]} tickFormatter={(value) => `${value}%`} />
                   <Tooltip
+                    {...chartTooltipProps}
                     labelFormatter={chartTimeFormatter}
                     formatter={(value: number, name) => [
                       `${Number(value).toFixed(1)}${name === '温度 °C' ? ' °C' : '%'}`,
@@ -397,6 +435,7 @@ export default function Instance() {
                   />
                   <YAxis {...wideYAxisProps} tickFormatter={(value) => formatSpeed(Number(value))} unit="" />
                   <Tooltip
+                    {...chartTooltipProps}
                     labelFormatter={chartTimeFormatter}
                     formatter={(value: number, name) => [formatSpeed(Number(value)), name]}
                   />
@@ -420,6 +459,7 @@ export default function Instance() {
                   />
                   <YAxis {...wideYAxisProps} domain={['auto', 'auto']} allowDecimals={false} unit=" 个" />
                   <Tooltip
+                    {...chartTooltipProps}
                     labelFormatter={chartTimeFormatter}
                     formatter={(value: number, name) => [Number(value).toFixed(0), name]}
                   />
@@ -443,6 +483,7 @@ export default function Instance() {
                   />
                   <YAxis {...wideYAxisProps} domain={['auto', 'auto']} allowDecimals={false} unit=" 个" />
                   <Tooltip
+                    {...chartTooltipProps}
                     labelFormatter={chartTimeFormatter}
                     formatter={(value: number) => [Number(value).toFixed(0), '进程数']}
                   />
@@ -472,13 +513,14 @@ export default function Instance() {
                     }}
                   />
                   <Tooltip
+                    {...chartTooltipProps}
                     labelFormatter={chartTimeFormatter}
                     formatter={(value: number) => {
                       if (chartTab === 'temp') return [`${Number(value).toFixed(1)} °C`, '温度'];
                       return [`${Number(value).toFixed(1)}%`, chartTab === 'cpu' ? 'CPU' : chartTab === 'ram' ? '内存' : '磁盘'];
                     }}
                   />
-                  <Line type="monotone" dataKey={chartTab} stroke="var(--accent-9)" dot={false} strokeWidth={2} isAnimationActive={false} />
+                  <Line type="monotone" dataKey={chartTab} stroke="var(--accent-9)" dot={chartTab === 'temp' || chartTab === 'disk' ? { r: 2 } : false} connectNulls={false} strokeWidth={2} isAnimationActive={false} />
                 </LineChart>
               </ResponsiveContainer>
             )}
@@ -534,6 +576,7 @@ export default function Instance() {
                   tick={<PingYAxisTick />}
                 />
                 <Tooltip
+                  {...chartTooltipProps}
                   labelFormatter={chartTimeFormatter}
                   formatter={(value: number, name) => [
                     formatPingMs(value),
@@ -606,12 +649,14 @@ function InstanceNodeSidebar({
   groups,
   activeUuid,
   onlineSet,
+  statusReady,
   liveData,
   onSelect,
 }: {
   groups: Array<{ group: string; nodes: ClientInfo[] }>;
   activeUuid: string;
   onlineSet: Set<string>;
+  statusReady: boolean;
   liveData: Record<string, Partial<PublicMonitorRecord>>;
   onSelect: (uuid: string) => void;
 }) {
@@ -624,7 +669,7 @@ function InstanceNodeSidebar({
           <Flex justify="between" align="center" className="instance-sidebar-header">
             <Box>
               <Text size="2" weight="bold" style={{ display: 'block' }}>节点列表</Text>
-              <Text size="1" color="gray">{onlineSet.size} / {total} 在线</Text>
+              <Text size="1" color="gray">{statusReady ? onlineSet.size : '—'} / {total} 在线</Text>
             </Box>
           </Flex>
 
@@ -648,14 +693,14 @@ function InstanceNodeSidebar({
                       title={node.name}
                     >
                       <span
-                        className={`instance-sidebar-status${isOnline ? ' is-online' : ' is-offline'}`}
+                        className={`instance-sidebar-status${isOnline ? ' is-online' : statusReady ? ' is-offline' : ''}`}
                         aria-hidden="true"
                       />
                       <Flag region={node.region} size={16} />
                       <span className="instance-sidebar-node-main">
                         <span className="instance-sidebar-node-name">{node.name}</span>
                         <span className="instance-sidebar-node-meta">
-                          {isOnline ? `CPU ${(live?.cpu ?? 0).toFixed(0)}%` : '离线'}
+                          {isOnline ? `CPU ${typeof live?.cpu === 'number' ? `${live.cpu.toFixed(0)}%` : '—'}` : statusReady ? '离线' : '确认中'}
                         </span>
                       </span>
                     </button>

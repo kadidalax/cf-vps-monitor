@@ -1,3 +1,5 @@
+import { currentScheduledBudget, ScheduledBudgetExceeded } from './scheduled-budget.ts';
+
 export const EMAIL_MESSAGE_MAX_CHARS = 4096;
 export const EMAIL_SUBJECT_MAX_CHARS = 120;
 export const SMTP_FETCH_TIMEOUT_MS = 8000;
@@ -23,6 +25,7 @@ export type SmtpIo = {
   readLine: () => Promise<string>;
   writeLine: (line: string) => Promise<void>;
   writeData: (data: string) => Promise<void>;
+  startTls?: () => Promise<void>;
 };
 
 const EMAIL_PATTERN = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
@@ -106,8 +109,28 @@ export function buildEmailMessage(input: {
   return `${headers.join('\r\n')}\r\n\r\n${body}`;
 }
 
-function smtpSuccess(line: string): boolean {
-  return /^[23]\d\d/.test(line);
+const SMTP_MAX_REPLY_BYTES = 64 * 1024;
+const SMTP_MAX_REPLY_LINES = 128;
+const SMTP_MAX_LINE_BYTES = 512;
+
+async function readSmtpReply(io: SmtpIo): Promise<{ code: number; lines: string[] }> {
+  let code = 0;
+  let totalBytes = 0;
+  const lines: string[] = [];
+  for (let index = 0; index < SMTP_MAX_REPLY_LINES; index += 1) {
+    const line = await io.readLine();
+    const bytes = new TextEncoder().encode(line).byteLength + 2;
+    totalBytes += bytes;
+    if (bytes > SMTP_MAX_LINE_BYTES || totalBytes > SMTP_MAX_REPLY_BYTES) throw new Error('SMTP reply exceeds limits');
+    const match = /^(\d{3})(?:([ -])(.*))?$/.exec(line);
+    if (!match) throw new Error('Malformed SMTP reply');
+    const current = Number(match[1]);
+    if (index === 0) code = current;
+    if (current !== code) throw new Error('Inconsistent multiline SMTP reply');
+    lines.push(match[3] || '');
+    if (match[2] !== '-') return { code, lines };
+  }
+  throw new Error('SMTP reply has too many lines');
 }
 
 function dotStuff(data: string): string {
@@ -120,34 +143,45 @@ export async function sendSmtpCommands(
   subject: string,
   body: string,
 ): Promise<SmtpResult> {
-  const greeting = await io.readLine();
-  if (!smtpSuccess(greeting)) return { ok: false, error: 'SMTP 服务不可用' };
+  if ((await readSmtpReply(io)).code !== 220) return { ok: false, error: 'SMTP 服务不可用' };
 
   await io.writeLine(`EHLO ${config.host}`);
-  if (!smtpSuccess(await io.readLine())) return { ok: false, error: 'SMTP EHLO 失败' };
+  const hello = await readSmtpReply(io);
+  if (hello.code !== 250) return { ok: false, error: 'SMTP EHLO 失败' };
+
+  if (config.security === 'starttls') {
+    if (!io.startTls) return { ok: false, error: 'SMTP 连接不支持 TLS 升级' };
+    if (!hello.lines.some(line => /^STARTTLS(?:\s|$)/i.test(line))) return { ok: false, error: 'SMTP 服务未提供 STARTTLS' };
+    await io.writeLine('STARTTLS');
+    if ((await readSmtpReply(io)).code !== 220) return { ok: false, error: 'SMTP STARTTLS 被拒绝' };
+    await io.startTls();
+    // RFC 3207: capabilities obtained before TLS must be discarded.
+    await io.writeLine(`EHLO ${config.host}`);
+    if ((await readSmtpReply(io)).code !== 250) return { ok: false, error: 'SMTP TLS EHLO 失败' };
+  }
 
   if (config.authMethod === 'login') {
     await io.writeLine('AUTH LOGIN');
-    await io.readLine();
+    if ((await readSmtpReply(io)).code !== 334) return { ok: false, error: 'SMTP 认证请求被拒绝' };
     await io.writeLine(utf8Base64(config.username));
-    await io.readLine();
+    if ((await readSmtpReply(io)).code !== 334) return { ok: false, error: 'SMTP 用户名被拒绝' };
     await io.writeLine(utf8Base64(config.password));
-    if (!smtpSuccess(await io.readLine())) return { ok: false, error: 'SMTP 认证失败' };
+    if ((await readSmtpReply(io)).code !== 235) return { ok: false, error: 'SMTP 认证失败' };
   } else {
     await io.writeLine(`AUTH PLAIN ${utf8Base64(`\0${config.username}\0${config.password}`)}`);
-    if (!smtpSuccess(await io.readLine())) return { ok: false, error: 'SMTP 认证失败' };
+    if ((await readSmtpReply(io)).code !== 235) return { ok: false, error: 'SMTP 认证失败' };
   }
 
   await io.writeLine(`MAIL FROM:<${config.fromAddress}>`);
-  if (!smtpSuccess(await io.readLine())) return { ok: false, error: 'SMTP 发件人被拒绝' };
+  if ((await readSmtpReply(io)).code !== 250) return { ok: false, error: 'SMTP 发件人被拒绝' };
 
   for (const recipient of config.recipients) {
     await io.writeLine(`RCPT TO:<${recipient}>`);
-    if (!smtpSuccess(await io.readLine())) return { ok: false, error: 'SMTP 收件人被拒绝' };
+    if (![250, 251, 252].includes((await readSmtpReply(io)).code)) return { ok: false, error: 'SMTP 收件人被拒绝' };
   }
 
   await io.writeLine('DATA');
-  if (!smtpSuccess(await io.readLine())) return { ok: false, error: 'SMTP DATA 失败' };
+  if ((await readSmtpReply(io)).code !== 354) return { ok: false, error: 'SMTP DATA 失败' };
   await io.writeData(`${dotStuff(buildEmailMessage({
     fromAddress: config.fromAddress,
     fromName: config.fromName,
@@ -156,23 +190,33 @@ export async function sendSmtpCommands(
     body,
     host: config.host,
   }))}\r\n.`);
-  if (!smtpSuccess(await io.readLine())) return { ok: false, error: 'SMTP 邮件内容被拒绝' };
+  if ((await readSmtpReply(io)).code !== 250) return { ok: false, error: 'SMTP 邮件内容被拒绝' };
 
-  await io.writeLine('QUIT');
+  // The final 250 commits acceptance. A subsequent disconnect must not cause
+  // the notification queue to resend an already accepted message.
+  try { void io.writeLine('QUIT').catch(() => {}); } catch {}
   return { ok: true };
 }
 
-async function readSmtpLine(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  decoder: TextDecoder,
-): Promise<string> {
-  let text = '';
-  while (!text.includes('\n')) {
-    const chunk = await reader.read();
-    if (chunk.done) break;
-    text += decoder.decode(chunk.value, { stream: true });
-  }
-  return text.split(/\r?\n/)[0] || '';
+function createSmtpLineReader(reader: ReadableStreamDefaultReader<Uint8Array>): () => Promise<string> {
+  const decoder = new TextDecoder();
+  let buffered = '';
+  return async () => {
+    while (true) {
+      const newline = buffered.indexOf('\n');
+      if (newline >= 0) {
+        const line = buffered.slice(0, newline).replace(/\r$/, '');
+        buffered = buffered.slice(newline + 1);
+        return line;
+      }
+      if (buffered.length >= SMTP_MAX_LINE_BYTES) throw new Error('SMTP line exceeds limits');
+      const chunk = await reader.read();
+      if (chunk.done) throw new Error('SMTP connection closed before a complete reply');
+      if (chunk.value.byteLength > SMTP_MAX_REPLY_BYTES) throw new Error('SMTP reply exceeds limits');
+      buffered += decoder.decode(chunk.value, { stream: true });
+      if (buffered.length > SMTP_MAX_REPLY_BYTES) throw new Error('SMTP reply exceeds limits');
+    }
+  };
 }
 
 export async function sendSmtpEmail(config: SmtpConfig, subject: string, body: string): Promise<SmtpResult> {
@@ -182,34 +226,52 @@ export async function sendSmtpEmail(config: SmtpConfig, subject: string, body: s
   if (config.recipients.length === 0) return { ok: false, error: '收件地址未配置' };
 
   const { connect } = await import('cloudflare:sockets');
-  const socket = connect(
+  const budget = currentScheduledBudget();
+  budget?.ensureCanStart(0);
+  let socket = connect(
     { hostname: config.host, port: config.port },
     { secureTransport: config.security === 'tls' ? 'on' : 'starttls', allowHalfOpen: false },
   );
-  const reader = socket.readable.getReader();
-  const writer = socket.writable.getWriter();
+  let reader = socket.readable.getReader();
+  let writer = socket.writable.getWriter();
   const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
+  let readLine = createSmtpLineReader(reader);
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
-  const timeout = new Promise<SmtpResult>((resolve) => {
+  const timeout = new Promise<SmtpResult>((resolve, reject) => {
     timeoutId = setTimeout(() => {
-      try { socket.close(); } catch {}
+      try { void socket.close().catch(() => {}); } catch {}
+      if (budget && budget.remainingMs() <= 0) {
+        reject(new ScheduledBudgetExceeded());
+        return;
+      }
       resolve({ ok: false, error: 'SMTP 连接超时' });
-    }, SMTP_FETCH_TIMEOUT_MS);
+    }, Math.min(SMTP_FETCH_TIMEOUT_MS, budget?.remainingMs() ?? SMTP_FETCH_TIMEOUT_MS));
   });
 
   const send = (async () => {
     try {
       return await sendSmtpCommands({
-        readLine: () => readSmtpLine(reader, decoder),
+        readLine: () => readLine(),
         writeLine: line => writer.write(encoder.encode(`${line}\r\n`)),
         writeData: data => writer.write(encoder.encode(`${data}\r\n`)),
+        startTls: async () => {
+          reader.releaseLock();
+          writer.releaseLock();
+          socket = socket.startTls();
+          await socket.opened;
+          reader = socket.readable.getReader();
+          writer = socket.writable.getWriter();
+          readLine = createSmtpLineReader(reader);
+        },
       }, config, subject, body);
+    } catch {
+      return { ok: false, error: 'SMTP 连接或安全协商失败' } satisfies SmtpResult;
     } finally {
+      try { reader.releaseLock(); } catch {}
+      try { writer.releaseLock(); } catch {}
+      try { await socket.close(); } catch {}
       if (timeoutId) clearTimeout(timeoutId);
-      try { await writer.close(); } catch {}
-      try { socket.close(); } catch {}
     }
   })();
 

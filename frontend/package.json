@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test",
     "build": "tsc -b && vite build",
     "preview": "vite preview"
   },
@@ -19,7 +20,7 @@
     "radix-ui": "^1.4.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.26.0",
+    "react-router-dom": "^7.18.3",
     "recharts": "^2.12.0",
     "sonner": "^1.5.0"
   },
@@ -29,7 +30,7 @@
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^6.0.2",
     "autoprefixer": "^10.4.19",
-    "postcss": "^8.4.38",
+    "postcss": "^8.5.28",
     "tailwindcss": "^3.4.4",
     "typescript": "^5.5.3",
     "vite": "^8.0.16"

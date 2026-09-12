@@ -57,7 +57,7 @@ export function buildDashboardStatusCards(input: DashboardStatusInput): Dashboar
     },
     {
       key: 'networkSpeed',
-      title: '网络速率',
+      title: '网速',
       value: speedValues.join('  '),
       detail: '实时上传 / 下载',
       inlineValues: speedValues,

@@ -1,4 +1,4 @@
-import { strFromU8, unzipSync } from 'fflate';
+import { strFromU8, unzipSync, Unzip, UnzipInflate } from 'fflate';
 
 export type ThemeConfigItemType = 'title' | 'switch' | 'select' | 'number' | 'string' | 'richtext' | 'color' | 'image' | 'range';
 
@@ -59,6 +59,10 @@ const MAX_ZIP_BYTES = 2 * 1024 * 1024;
 const MAX_CSS_BYTES = 256 * 1024;
 const MAX_IMAGE_BYTES = 512 * 1024;
 const MAX_ASSETS = 32;
+const MAX_MANIFEST_BYTES = 64 * 1024;
+const MAX_UNZIPPED_BYTES = MAX_ASSETS * MAX_IMAGE_BYTES + MAX_MANIFEST_BYTES;
+const MAX_ZIP_ENTRIES = 128;
+const ZIP_INPUT_CHUNK_BYTES = 256;
 const MAX_CUSTOM_CSS_BYTES = 64 * 1024;
 const ALLOWED_EXTENSIONS = new Set(['.css', '.png', '.jpg', '.jpeg', '.webp', '.svg', '.json', '.woff2']);
 const FORBIDDEN_EXTENSIONS = new Set(['.js', '.html', '.htm', '.wasm', '.woff', '.ttf', '.otf', '.eot']);
@@ -225,14 +229,88 @@ export function base64ToBytes(base64: string): Uint8Array {
   return bytes;
 }
 
+function themeFileByteLimit(path: string): number {
+  if (path === 'cf-monitor-theme.json') return MAX_MANIFEST_BYTES;
+  return extensionOf(path) === '.css' ? MAX_CSS_BYTES : MAX_IMAGE_BYTES;
+}
+
+function unzipThemeWithLimits(zipBytes: Uint8Array): Map<string, Uint8Array> {
+  const declared = new Map<string, { originalSize: number; compression: number }>();
+  let entryCount = 0;
+  let declaredBytes = 0;
+  // This pass only reads the central directory. Returning false for every file
+  // prevents unzipSync from allocating or inflating any file contents.
+  unzipSync(zipBytes, { filter: file => {
+    if (++entryCount > MAX_ZIP_ENTRIES) throw new Error('theme package has too many entries');
+    if (file.name.endsWith('/')) {
+      normalizeThemePath(file.name.slice(0, -1));
+      if (file.originalSize !== 0) throw new Error('theme directory size is invalid');
+      return false;
+    }
+    const path = normalizeThemePath(file.name);
+    assertAllowedFile(path);
+    if (declared.has(path)) throw new Error(`duplicate theme path: ${path}`);
+    if (declared.size >= MAX_ASSETS + 1) throw new Error('theme package has too many files');
+    if (file.compression !== 0 && file.compression !== 8) throw new Error('theme compression is not supported');
+    if (!Number.isSafeInteger(file.originalSize) || file.originalSize < 0 || file.originalSize > themeFileByteLimit(path)) {
+      throw new Error(`theme asset is too large: ${path}`);
+    }
+    declaredBytes += file.originalSize;
+    if (declaredBytes > MAX_UNZIPPED_BYTES) throw new Error('theme uncompressed size is too large');
+    declared.set(path, { originalSize: file.originalSize, compression: file.compression });
+    return false;
+  } });
+
+  const files = new Map<string, Uint8Array>();
+  const seen = new Set<string>();
+  let actualBytes = 0;
+  let failure: Error | undefined;
+  const stream = new Unzip(file => {
+    if (failure || file.name.endsWith('/')) return;
+    const path = normalizeThemePath(file.name);
+    const entry = declared.get(path);
+    if (!entry || seen.has(path) || entry.compression !== file.compression) throw new Error('theme ZIP directory mismatch');
+    if (file.originalSize !== undefined && file.originalSize !== entry.originalSize) throw new Error('theme ZIP size mismatch');
+    seen.add(path);
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    file.ondata = (error, data, final) => {
+      if (failure) return;
+      if (error) { failure = error; file.terminate(); return; }
+      size += data.byteLength;
+      actualBytes += data.byteLength;
+      if (size > themeFileByteLimit(path) || size > entry.originalSize || actualBytes > MAX_UNZIPPED_BYTES) {
+        failure = new Error(`theme actual output size is too large: ${path}`);
+        file.terminate();
+        return;
+      }
+      chunks.push(data.slice());
+      if (final) {
+        if (size !== entry.originalSize) { failure = new Error(`theme ZIP size mismatch: ${path}`); return; }
+        const bytes = new Uint8Array(size);
+        let offset = 0;
+        for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+        files.set(path, bytes);
+      }
+    };
+    file.start();
+  });
+  stream.register(UnzipInflate);
+  // Limit each inflate call as well as retained output: a tiny high-ratio input
+  // must not expand the whole archive before the output callback can reject it.
+  for (let offset = 0; offset < zipBytes.byteLength; offset += ZIP_INPUT_CHUNK_BYTES) {
+    const end = Math.min(offset + ZIP_INPUT_CHUNK_BYTES, zipBytes.byteLength);
+    stream.push(zipBytes.subarray(offset, end), end === zipBytes.byteLength);
+    if (failure) throw failure;
+  }
+  if (files.size !== declared.size) throw new Error('theme ZIP is incomplete');
+  return files;
+}
+
 export function parseThemeZip(zipBytes: Uint8Array): ParsedThemePackage {
   if (zipBytes.byteLength > MAX_ZIP_BYTES) throw new Error('theme zip is too large');
-  const files = unzipSync(zipBytes);
-  const entries = Object.entries(files)
-    .filter(([path]) => !path.endsWith('/'))
-    .map(([rawPath, bytes]) => [normalizeThemePath(rawPath), bytes] as const);
-  if (entries.length > MAX_ASSETS + 1) throw new Error('theme package has too many files');
-  const fileMap = new Map(entries);
+  const fileMap = unzipThemeWithLimits(zipBytes);
+  const entries = [...fileMap.entries()];
 
   const manifestBytes = fileMap.get('cf-monitor-theme.json');
   if (!manifestBytes) throw new Error('theme manifest cf-monitor-theme.json is required');

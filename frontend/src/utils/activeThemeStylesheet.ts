@@ -18,10 +18,16 @@ const THEME_REFRESH_MIN_INTERVAL_MS = 3_000;
 let lastThemeRefreshAt = 0;
 
 export function refreshActiveThemeStylesheet(options: { force?: boolean } = {}) {
-  const link = ensureActiveThemeStylesheet();
+  const link = document.getElementById('cf-monitor-active-theme-css') as HTMLLinkElement | null;
+  if (!link) return null;
   const now = Date.now();
   if (!options.force && now - lastThemeRefreshAt < THEME_REFRESH_MIN_INTERVAL_MS) return link;
   lastThemeRefreshAt = now;
   link.href = `/api/theme/active.css?v=${now}`;
   return link;
+}
+
+export function removeActiveThemeStylesheet(): void {
+  document.getElementById('cf-monitor-active-theme-css')?.remove();
+  lastThemeRefreshAt = 0;
 }

@@ -6,7 +6,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { hasLocalDisplayThemePreference, useDisplayTheme } from '../contexts/DisplayThemeContext';
 import { toast } from 'sonner';
 import Loading from '../components/Loading';
-import { refreshActiveThemeStylesheet } from '../utils/activeThemeStylesheet';
+import { removeActiveThemeStylesheet } from '../utils/activeThemeStylesheet';
 import { normalizeDisplayTheme } from '../utils/displayTheme';
 import { fetchPublicSettings } from '../utils/publicSettings';
 import { formatAppVersion } from '../utils/version';
@@ -68,7 +68,7 @@ export default function Login() {
   }, []);
 
   React.useEffect(() => {
-    refreshActiveThemeStylesheet();
+    removeActiveThemeStylesheet();
     fetchPublicSettings({ force: true })
       .then((data) => {
         if (!hasLocalDisplayThemePreference()) {
@@ -147,9 +147,8 @@ export default function Login() {
 
   const handleRecoverySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const needsSecretKey = recoveryStatus?.admin_present === true;
-    if ((needsSecretKey && !recoveryKey) || !recoveryUsername || !recoveryPassword) {
-      toast.error(needsSecretKey ? '请填写 Supabase Secret key、用户名和新密码' : '请填写用户名和密码');
+    if (!recoveryKey || !recoveryUsername || !recoveryPassword) {
+      toast.error('请填写 Supabase Secret key、用户名和新密码');
       return;
     }
 
@@ -158,8 +157,8 @@ export default function Login() {
       const payload: Record<string, string> = {
         username: recoveryUsername,
         password: recoveryPassword,
+        supabase_secret_key: recoveryKey,
       };
-      if (needsSecretKey) payload.supabase_secret_key = recoveryKey;
       const response = await fetch('/api/admin/recovery', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -185,7 +184,6 @@ export default function Login() {
   };
 
   const recoveryTitle = recoveryStatus?.admin_present ? '重置管理员' : '创建管理员';
-  const needsSecretKey = recoveryStatus?.admin_present === true;
 
   return (
     <div className="login-page">
@@ -325,7 +323,7 @@ export default function Login() {
         {recoveryMode && (
           <form onSubmit={handleRecoverySubmit}>
             <Flex direction="column" gap="4">
-              {needsSecretKey && <label htmlFor="recovery-secret-key">
+              <label htmlFor="recovery-secret-key">
                 <Text size="2" weight="bold" style={{ marginBottom: 6, display: 'inline-block' }}>
                   Supabase Secret key
                 </Text>
@@ -337,10 +335,11 @@ export default function Login() {
                   value={recoveryKey}
                   onChange={(e) => setRecoveryKey(e.target.value)}
                   autoComplete="off"
+                  required
                   autoFocus
                   style={{ width: '100%' }}
                 />
-              </label>}
+              </label>
 
               <label htmlFor="recovery-username">
                 <Text size="2" weight="bold" style={{ marginBottom: 6, display: 'inline-block' }}>
@@ -353,7 +352,6 @@ export default function Login() {
                   value={recoveryUsername}
                   onChange={(e) => setRecoveryUsername(e.target.value)}
                   autoComplete="username"
-                  autoFocus={!needsSecretKey}
                   style={{ width: '100%' }}
                 />
               </label>

@@ -1,30 +1,9 @@
 -- Source: 20260615001000_restrict_public_schema_privileges.sql
 set local search_path = public;
 
-do $$
-declare
-  role_name text;
-begin
-  revoke all on schema public from public;
-  revoke all on all tables in schema public from public;
-  revoke all on all sequences in schema public from public;
-  revoke all on all functions in schema public from public;
-  alter default privileges in schema public revoke all on tables from public;
-  alter default privileges in schema public revoke all on sequences from public;
-  alter default privileges in schema public revoke all on functions from public;
-
-  foreach role_name in array array['anon', 'authenticated'] loop
-    if to_regrole(role_name) is not null then
-      execute format('revoke all on schema public from %I', role_name);
-      execute format('revoke all on all tables in schema public from %I', role_name);
-      execute format('revoke all on all sequences in schema public from %I', role_name);
-      execute format('revoke all on all functions in schema public from %I', role_name);
-      execute format('alter default privileges in schema public revoke all on tables from %I', role_name);
-      execute format('alter default privileges in schema public revoke all on sequences from %I', role_name);
-      execute format('alter default privileges in schema public revoke all on functions from %I', role_name);
-    end if;
-  end loop;
-end $$;
+-- 1_core_schema.sql restricts the named application tables and owned sequences.
+-- RPC grants are restricted individually in 4_rpc_api.sql. Do not change shared
+-- schema access, unrelated objects, or the owner's default privileges here.
 
 insert into settings (key, value)
 values ('schema_bootstrap_version', 'postgres-2026-06-15-v3')
@@ -53,36 +32,44 @@ begin
 end $$;
 
 grant usage on schema public to cf_monitor_app;
-grant select, insert, update, delete on all tables in schema public to cf_monitor_app;
-grant usage on all sequences in schema public to cf_monitor_app;
-alter default privileges in schema public grant select, insert, update, delete on tables to cf_monitor_app;
-alter default privileges in schema public grant usage on sequences to cf_monitor_app;
 
 do $$
 declare
   table_name text;
+  sequence_oid oid;
+  sequence_table_name text;
+  app_tables constant text[] := array[
+    'clients', 'records', 'gpu_records', 'gpu_snapshots', 'users',
+    'login_rate_limits', 'settings', 'themes', 'theme_assets', 'ping_tasks',
+    'ping_records', 'ping_snapshots', 'website_monitors', 'website_checks',
+    'offline_notifications', 'expiry_notifications', 'load_notifications', 'audit_logs'
+  ];
 begin
-  foreach table_name in array array[
-    'clients',
-    'records',
-    'gpu_records',
-    'gpu_snapshots',
-    'users',
-    'login_rate_limits',
-    'settings',
-    'ping_tasks',
-    'ping_records',
-    'ping_snapshots',
-    'offline_notifications',
-    'expiry_notifications',
-    'load_notifications',
-    'audit_logs'
-  ] loop
+  foreach table_name in array app_tables loop
+    execute format('grant select, insert, update, delete on table public.%I to cf_monitor_app, service_role', table_name);
     execute format('drop policy if exists cf_monitor_app_all on public.%I', table_name);
     execute format(
       'create policy cf_monitor_app_all on public.%I for all to cf_monitor_app using (true) with check (true)',
       table_name
     );
+  end loop;
+  for sequence_oid, sequence_table_name in
+    select distinct sequence.oid, owner_table.relname
+    from pg_class sequence
+    join pg_depend dependency on dependency.objid = sequence.oid
+      and dependency.classid = 'pg_class'::regclass
+      and dependency.deptype in ('a', 'i')
+    join pg_class owner_table on owner_table.oid = dependency.refobjid
+    join pg_namespace namespace on namespace.oid = owner_table.relnamespace
+    where sequence.relkind = 'S' and namespace.nspname = 'public'
+      and owner_table.relname = any(app_tables)
+  loop
+    execute format('grant usage on sequence %s to cf_monitor_app, service_role', sequence_oid::regclass);
+    if sequence_table_name = any(array['website_monitors', 'ping_tasks', 'load_notifications']) then
+      -- Restore reserves explicit IDs with setval, which requires UPDATE rather
+      -- than USAGE. Do not depend on the project owner's default sequence ACLs.
+      execute format('grant update on sequence %s to service_role', sequence_oid::regclass);
+    end if;
   end loop;
 end $$;
 

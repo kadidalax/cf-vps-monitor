@@ -106,6 +106,10 @@ export const SETTING_SCHEMA = {
   },
   record_persist_interval_sec: {
     type: 'integer',
+    // 保持 120。这里的值必须与 1_core_schema.sql 的 seed 一致——seed 写的是真实行，
+    // buildAdminSettings 取 stored[key] ?? defaultValue，两者不一致时改这里毫无效果。
+    // 另：本项目的写入量受 max(上报间隔, 节流间隔) 约束，空闲态 120s 上报才是约束项；
+    // 一旦上采样功能落地，调低这个值会直接把写入量推到 2880 行/节点·天而超出免费额度。
     defaultValue: '120',
     public: false,
     min: 3,
@@ -120,10 +124,20 @@ export const SETTING_SCHEMA = {
   },
   record_high_watermark_rows: {
     type: 'integer',
-    defaultValue: '450000',
+    defaultValue: '700000',
     public: false,
     min: 1000,
     max: 10000000,
+  },
+  // 历史表真实磁盘占用（含索引）的熔断线，字节。Supabase 免费库卡的是磁盘字节，
+  // 行数只是它的粗糙代理：同样行数可能对应 72MB 也可能 189MB。
+  // 默认 400 MiB，给非历史表与索引膨胀留出余量。
+  record_high_watermark_bytes: {
+    type: 'integer',
+    defaultValue: '419430400',
+    public: false,
+    min: 16777216,
+    max: 549755813888,
   },
   capacity_daily_view_minutes: {
     type: 'integer',
@@ -312,6 +326,13 @@ export const SETTING_SCHEMA = {
     defaultValue: 'true',
     public: false,
   },
+  offline_confirm_rounds: {
+    type: 'integer',
+    defaultValue: '3',
+    public: false,
+    min: 1,
+    max: 10,
+  },
   theme_bg_desktop: {
     type: 'string',
     defaultValue: '',
@@ -459,11 +480,22 @@ function normalizeEmailRecipients(value: unknown): string | null {
   return [...new Set(recipients)].join(',');
 }
 
-function normalizeWebhookUrl(value: unknown): string | null {
-  if (value === '' || value === null || value === undefined) return '';
-  if (typeof value !== 'string') return null;
-  const normalized = validateWebhookUrl(value);
-  return normalized.ok ? normalized.url : null;
+/**
+ * 「填了本站地址」要单独回一句人话——落到通用的「类型或取值无效」上，
+ * 用户只会反复换写法而不知道错在哪。
+ */
+function normalizeWebhookUrlForWrite(
+  value: unknown,
+  selfHost?: string,
+): { ok: true; value: string } | { ok: false; error: string } {
+  if (value === '' || value === null || value === undefined) return { ok: true, value: '' };
+  if (typeof value !== 'string') return { ok: false, error: 'webhook_url 类型或取值无效' };
+  const normalized = validateWebhookUrl(value, selfHost);
+  if (normalized.ok) return { ok: true, value: normalized.url };
+  if (normalized.error === 'self_host') {
+    return { ok: false, error: 'webhook_url 不能填本站地址，否则告警会绕回自己；请填写外部接收方的地址' };
+  }
+  return { ok: false, error: 'webhook_url 类型或取值无效' };
 }
 
 function normalizeWebhookContentType(value: unknown): string | null {
@@ -496,6 +528,7 @@ export function isKnownSettingKey(key: string): key is SettingKey {
 export function normalizeSettingValue(
   key: string,
   value: unknown,
+  selfHost?: string,
 ): { ok: true; value: string } | { ok: false; error: string } {
   if (!isKnownSettingKey(key)) {
     return { ok: false, error: `未知设置: ${key}` };
@@ -523,7 +556,13 @@ export function normalizeSettingValue(
       else if (key === 'email_smtp_host') normalized = normalizeSmtpHost(value);
       else if (key === 'email_smtp_from_address') normalized = normalizeEmailAddress(value);
       else if (key === 'email_smtp_recipients') normalized = normalizeEmailRecipients(value);
-      else if (key === 'webhook_url') normalized = normalizeWebhookUrl(value);
+      else if (key === 'webhook_url') {
+        // 不传 selfHost 时 normalizeWebhookUrl 的行为与改动前完全一致；
+        // 这里走详细版只为把 self_host 的提示带出去。
+        const result = normalizeWebhookUrlForWrite(value, selfHost);
+        if (!result.ok) return result;
+        normalized = result.value;
+      }
       else if (key === 'webhook_content_type') normalized = normalizeWebhookContentType(value);
       else if (key === 'webhook_headers_json') normalized = normalizeWebhookHeadersJson(value);
       else if (key === 'active_theme') {
@@ -559,7 +598,7 @@ export function normalizeSettingValue(
 
 export function sanitizeSettingsForStorage(
   input: unknown,
-  options: { ignoreRemoved?: boolean } = {},
+  options: { ignoreRemoved?: boolean; selfHost?: string } = {},
 ): { ok: boolean; settings: Record<string, string>; errors: string[]; ignoredKeys: string[] } {
   const ignoreRemoved = options.ignoreRemoved ?? true;
   if (!isPlainObject(input)) {
@@ -575,7 +614,7 @@ export function sanitizeSettingsForStorage(
       ignoredKeys.push(key);
       continue;
     }
-    const normalized = normalizeSettingValue(key, value);
+    const normalized = normalizeSettingValue(key, value, options.selfHost);
     if (!normalized.ok) {
       errors.push(normalized.error);
       continue;

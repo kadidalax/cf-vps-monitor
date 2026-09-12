@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   DndContext,
   DragEndEvent,
@@ -21,7 +21,7 @@ import {
 } from '@radix-ui/themes';
 import {
   Plus, Pencil, Trash2, Copy, Search,
-  GripVertical, RefreshCw, Download, EyeOff, Server, Wifi, Layers, KeyRound
+  Grip, RefreshCw, Download, EyeOff, Server, Wifi, Layers, KeyRound
 } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
@@ -75,6 +75,7 @@ interface AdminClient extends ClientInfo {
   updated_at: string;
   auto_renewal: boolean;
   traffic_limit_type: string;
+  traffic_reset_day?: number;
 }
 
 type CommandClient = Partial<AdminClient> & Pick<AdminClient, 'uuid' | 'name'> & { token?: string };
@@ -101,7 +102,8 @@ function optimisticAdminClient(created: CommandClient): AdminClient {
     currency: '$',
     expired_at: '',
     traffic_limit: 0,
-    traffic_limit_type: 'max',
+    // 新增节点默认按「总计」统计流量，与 parseTrafficLimitType 的兜底值保持一致
+    traffic_limit_type: 'sum',
     sort_order: 0,
     token,
     token_last_used_at: null,
@@ -307,7 +309,7 @@ function SortableNodeCard({ node, selected, onSelect, liveData, onDetail, onEdit
                 {...attributes}
                 {...listeners}
               >
-                <GripVertical size={15} />
+                <Grip size={15} />
               </button>
             </Tooltip>
             <Checkbox className="admin-node-checkbox" checked={selected} onCheckedChange={() => onSelect(node.uuid)} />
@@ -319,18 +321,11 @@ function SortableNodeCard({ node, selected, onSelect, liveData, onDetail, onEdit
             onClick={() => onDetail(node)}
             title={node.name || '查看详情'}
           >
-            <span className="admin-node-card-title-copy">
-              <span className="admin-node-card-name-row">
-                <span className="admin-node-card-flag">
-                  <Flag region={node.region} size={20} />
-                </span>
-                <Text className="admin-node-name-text" size="2" weight="bold">{node.name || '未命名'}</Text>
+            <span className="admin-node-card-name-row">
+              <span className="admin-node-card-flag">
+                <Flag region={node.region} size={20} />
               </span>
-              <span className="admin-node-card-badges">
-                <Badge size="1" variant="soft" color={isOnline ? 'green' : 'gray'}>{isOnline ? '在线' : '离线'}</Badge>
-                <Badge className="admin-node-region-badge" size="1" variant="soft" color="gray" title={node.region || '未知'}>{node.region || '未知'}</Badge>
-                {Boolean(node.hidden) && <Badge size="1" variant="soft" color="orange">隐藏</Badge>}
-              </span>
+              <Text className="admin-node-name-text" size="2" weight="bold">{node.name || '未命名'}</Text>
             </span>
           </button>
 
@@ -340,6 +335,13 @@ function SortableNodeCard({ node, selected, onSelect, liveData, onDetail, onEdit
             <RowActionButton label="重置 Token" onClick={() => onRotateToken(node)}><KeyRound size={13} /></RowActionButton>
             <RowActionButton label="删除" color="red" onClick={() => onDelete(node)}><Trash2 size={13} /></RowActionButton>
           </Flex>
+
+          {/* 徽章行独占第二行并跨到操作按钮列下方，让长地名能用满整卡宽度 */}
+          <span className="admin-node-card-badges">
+            <span className={`admin-node-status-text${isOnline ? ' is-online' : ' is-offline'}`}>{isOnline ? '在线' : '离线'}</span>
+            <Badge className="admin-node-region-badge" size="1" variant="soft" color="gray" title={node.region || '未知'}>{node.region || '未知'}</Badge>
+            {Boolean(node.hidden) && <Badge size="1" variant="soft" color="orange">隐藏</Badge>}
+          </span>
         </div>
 
         <div className="admin-node-card-body">
@@ -387,7 +389,12 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: Command
   useEffect(() => {
     let cancelled = false;
     if (open) {
-      setInstallOptions({ ...defaultAgentInstallOptions });
+      // 重置日以后台记录为准：装机命令与节点配置从一开始就一致，
+      // 否则装完立刻会被 policy 改回后台的值，并连带清零当期累计。
+      setInstallOptions({
+        ...defaultAgentInstallOptions,
+        trafficResetDay: String(client.traffic_reset_day || 1),
+      });
       setAgentToken(client.token || '');
       fetchPublicSettings()
         .then(d => {
@@ -555,6 +562,7 @@ function FieldInput({
   placeholder,
   helper,
   min,
+  max,
   step,
 }: {
   label: string;
@@ -565,6 +573,7 @@ function FieldInput({
   placeholder?: string;
   helper?: string;
   min?: string | number;
+  max?: string | number;
   step?: string | number;
 }) {
   return (
@@ -580,6 +589,7 @@ function FieldInput({
             type={(type || 'text') as never}
             placeholder={placeholder}
             min={min as never}
+            max={max as never}
             step={step as never}
           />
         )
@@ -600,6 +610,7 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
       group: client.group || '', tags: client.tags || '',
       price: client.price ?? 0, currency: client.currency || '¥', billing_cycle: client.billing_cycle || 30,
       traffic_limit_form: createTrafficLimitFormValue(client.traffic_limit, client.traffic_limit_type),
+      traffic_reset_day: client.traffic_reset_day || 1,
       expired_at: toDateInputValue(client.expired_at),
       hidden: client.hidden || false, auto_renewal: client.auto_renewal || false,
     });
@@ -625,6 +636,12 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
       payload.traffic_limit = trafficLimit.traffic_limit;
       payload.traffic_limit_type = trafficLimit.traffic_limit_type;
       delete payload.traffic_limit_form;
+      const resetDay = parseInt(String(payload.traffic_reset_day ?? 1), 10);
+      if (!Number.isFinite(resetDay) || resetDay < 1 || resetDay > 31) {
+        toast.error('流量重置日必须是 1 到 31 之间的整数');
+        return;
+      }
+      payload.traffic_reset_day = resetDay;
       if (payload.expired_at === '') payload.expired_at = null;
       const result = await apiFetch('/admin/clients/' + client.uuid + '/edit', { method: 'POST', body: JSON.stringify(payload) });
       if (result.success || result.uuid) {
@@ -687,6 +704,21 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
               value={(form.traffic_limit_form as TrafficLimitFormValue) || createTrafficLimitFormValue(0, 'sum')}
               onChange={(value) => update('traffic_limit_form', value)}
             />
+            <Box>
+              <FieldInput
+                label="流量重置日"
+                value={String(form.traffic_reset_day ?? 1)}
+                onChange={v => update('traffic_reset_day', v)}
+                type="number"
+                min="1"
+                max="31"
+                step="1"
+              />
+              <Text size="1" color="gray" style={{ display: 'block', marginTop: 4 }}>
+                每月几号开始重新计算流量，保存后由服务端下发给探针，无需重装。
+                <Text size="1" color="orange"> 改这个值会让当期已累计的流量从此刻重新起算。</Text>
+              </Text>
+            </Box>
             <Flex className="billing-switch-row" gap="3">
               <Flex className="billing-switch-item" align="center" justify="between">
                 <Text size="2">对游客隐藏</Text>
@@ -842,6 +874,18 @@ export default function AdminDashboard() {
   const apiFetch = useApi();
   const { liveData: rawLiveData, refresh: refreshLive } = useLiveData();
   const [clients, setClients] = useState<AdminClient[]>([]);
+  const [clientsReady, setClientsReady] = useState(false);
+  const [clientsError, setClientsError] = useState(false);
+  const clientsMountedRef = useRef(false);
+  const clientsReadRef = useRef(0);
+  const clientOrderRef = useRef(0);
+  const clientUpdatesRef = useRef<Array<(current: AdminClient[]) => AdminClient[]> | null>(null);
+  const updateClients = useCallback((update: React.SetStateAction<AdminClient[]>) => {
+    if (!clientsMountedRef.current) return;
+    const apply = typeof update === 'function' ? update : () => update;
+    clientUpdatesRef.current?.push(apply);
+    setClients(apply);
+  }, []);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [selectedGroup, setSelectedGroup] = useState('all');
@@ -892,7 +936,7 @@ export default function AdminDashboard() {
       });
       if (!result.success) throw new Error(result.error || '批量隐藏失败');
       toast.success(`已隐藏 ${result.updated ?? selectedNodes.length} 个节点`);
-      setClients((prev) => prev.map((client) => selectedNodes.includes(client.uuid) ? { ...client, hidden: true } : client));
+      updateClients((prev) => prev.map((client) => selectedNodes.includes(client.uuid) ? { ...client, hidden: true } : client));
       setSelectedNodes([]);
       notifyPublicDataUpdated({
         clients: {
@@ -911,7 +955,7 @@ export default function AdminDashboard() {
       });
       if (!result.success) throw new Error(result.error || '批量删除失败');
       toast.success(`已删除 ${result.removed ?? selectedNodes.length} 个节点`);
-      setClients((prev) => prev.filter((client) => !selectedNodes.includes(client.uuid)));
+      updateClients((prev) => prev.filter((client) => !selectedNodes.includes(client.uuid)));
       setSelectedNodes([]);
       setBatchDeleteOpen(false);
       notifyPublicDataUpdated({ clients: { remove: selectedNodes } });
@@ -933,14 +977,38 @@ export default function AdminDashboard() {
   const dragDisabled = sortKey !== 'manual' || Boolean(search.trim()) || selectedGroup !== 'all' || statusFilter !== 'all';
 
   const loadClients = useCallback(async (force = false) => {
+    const request = ++clientsReadRef.current;
+    const updates: Array<(current: AdminClient[]) => AdminClient[]> = [];
+    clientUpdatesRef.current = updates;
+    const isCurrent = () => clientsMountedRef.current && clientsReadRef.current === request;
     try {
       const data = await apiFetch(force ? '/admin/clients?refresh=1' : '/admin/clients');
-      if (Array.isArray(data)) setClients(data);
-    } catch {}
-    setLoading(false);
+      if (!Array.isArray(data) || data.some((client) =>
+        !client || typeof client !== 'object' || typeof client.uuid !== 'string' || !client.uuid.trim() || typeof client.name !== 'string',
+      )) throw new Error('Invalid server list');
+      if (isCurrent()) {
+        setClients(updates.reduce((list, update) => update(list), data));
+        setClientsReady(true);
+        setClientsError(false);
+      }
+    } catch {
+      if (isCurrent()) setClientsError(true);
+    }
+    if (isCurrent()) {
+      clientUpdatesRef.current = null;
+      setLoading(false);
+    }
   }, [apiFetch]);
 
-  useEffect(() => { loadClients(); }, [loadClients]);
+  useEffect(() => {
+    clientsMountedRef.current = true;
+    void loadClients();
+    return () => {
+      clientsMountedRef.current = false;
+      clientsReadRef.current += 1;
+      clientUpdatesRef.current = null;
+    };
+  }, [loadClients]);
   useEffect(() => {
     const handleVisible = () => {
       void loadClients();
@@ -949,7 +1017,7 @@ export default function AdminDashboard() {
     window.addEventListener('focus', handleVisible);
     const unsubscribePublicData = subscribePublicDataUpdated((detail) => {
       if (detail?.clients) {
-        setClients((current) => applyAdminClientUpdate(current, detail));
+        updateClients((current) => applyAdminClientUpdate(current, detail));
         return;
       }
       void loadClients(true);
@@ -963,7 +1031,7 @@ export default function AdminDashboard() {
       unsubscribePublicData();
       window.clearInterval(iv);
     };
-  }, [loadClients]);
+  }, [loadClients, updateClients]);
 
   const groups = useMemo(() => getNodeGroups(clients), [clients]);
 
@@ -974,25 +1042,34 @@ export default function AdminDashboard() {
     const previousClients = clients;
     const nextClients = moveAdminNodeInVisibleOrder(clients, filtered, String(active.id), String(over.id));
     if (nextClients === clients) return;
-    setClients(nextClients);
+    const orderRequest = ++clientOrderRef.current;
+    const applyOrder = (order: AdminClient[]) => (current: AdminClient[]) => {
+      const positions = new Map(order.map((client) => [client.uuid, client.sort_order]));
+      return current.map((client) => positions.has(client.uuid) ? { ...client, sort_order: positions.get(client.uuid)! } : client)
+        .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+    };
+    updateClients(applyOrder(nextClients));
 
     try {
       const result = await apiFetch('/admin/clients/reorder', {
         method: 'POST',
         body: JSON.stringify({ uuids: nextClients.map((client) => client.uuid) }),
       });
+      if (clientOrderRef.current !== orderRequest) return;
       if (result.success) {
         toast.success('节点排序已更新');
-        notifyPublicDataUpdated({ clients: { upsert: nextClients } });
+        updateClients(applyOrder(nextClients));
+        notifyPublicDataUpdated({ clients: { upsert: nextClients.map(({ uuid, sort_order }) => ({ uuid, sort_order })) } });
       } else {
         toast.error(result.error || '排序失败');
-        setClients(previousClients);
-        loadClients(true);
+        updateClients(applyOrder(previousClients));
+        void loadClients(true);
       }
     } catch (error) {
+      if (clientOrderRef.current !== orderRequest) return;
       toast.error(error instanceof Error ? error.message : '排序失败');
-      setClients(previousClients);
-      loadClients(true);
+      updateClients(applyOrder(previousClients));
+      void loadClients(true);
     }
   };
 
@@ -1046,17 +1123,26 @@ export default function AdminDashboard() {
         <section className="admin-page-hero admin-server-overview-hero">
           <div className="admin-overview-strip">
             {overviewCards.map((card) => (
-              <div className="admin-overview-item" key={card.label} title={card.detail}>
+              <div className="admin-overview-item" key={card.label} title={clientsReady ? card.detail : '尚未读取到服务器列表'}>
                 <Flex align="center" gap="2" className="admin-overview-line">
                   <span className="admin-overview-icon" aria-hidden="true">{card.icon}</span>
                   <Text className="admin-overview-label" size="2">{card.label}</Text>
-                  <Text className="admin-overview-value" size="4" weight="bold">{card.value}</Text>
+                  <Text className="admin-overview-value" size="4" weight="bold">{clientsReady ? card.value : '—'}</Text>
                 </Flex>
               </div>
             ))}
           </div>
         </section>
       </Flex>
+
+      {clientsError && (
+        <Flex role="alert" align="center" justify="between" gap="3" wrap="wrap">
+          <Text color="red" size="2">
+            {clientsReady ? '刷新服务器列表失败，当前保留上次读取的数据。' : '读取服务器列表失败，尚无法确认服务器数量。'}
+          </Text>
+          <Button variant="soft" size="1" onClick={() => void loadClients(true)}>重试读取</Button>
+        </Flex>
+      )}
 
       <Card className="admin-filter-card">
         <Flex className="admin-filter-toolbar" direction="column" gap="2">
@@ -1123,12 +1209,12 @@ export default function AdminDashboard() {
             <Flex className="admin-node-card-panel-header" justify="between" align="center" gap="2">
               <Text size="2" weight="bold">服务器节点</Text>
               <Flex align="center" gap="2">
-                <Text size="1" color="gray">当前 {filtered.length} 个</Text>
+                <Text size="1" color="gray">{clientsReady ? `当前 ${filtered.length} 个` : '数量未知'}</Text>
                 <Checkbox checked={allFilteredSelected} onCheckedChange={toggleSelectAll} />
               </Flex>
             </Flex>
             {filtered.length === 0 ? (
-              <Text align="center" color="gray" style={{ display: 'block', padding: 24 }}>{search ? '未找到匹配的服务器' : '暂无服务器'}</Text>
+              <Text align="center" color="gray" style={{ display: 'block', padding: 24 }}>{!clientsReady ? '请重试读取服务器列表' : search ? '未找到匹配的服务器' : '暂无服务器'}</Text>
             ) : (
               <div className="admin-node-card-grid">
                 {filtered.map((client) => (
@@ -1163,7 +1249,7 @@ export default function AdminDashboard() {
         onSaved={(created) => {
           if (created) {
             const optimistic = optimisticAdminClient(created);
-            setClients(prev => prev.some(client => client.uuid === created.uuid)
+            updateClients(prev => prev.some(client => client.uuid === created.uuid)
               ? prev
               : [...prev, optimistic]);
             notifyPublicDataUpdated({ clients: { upsert: [optimistic] } });
@@ -1178,7 +1264,7 @@ export default function AdminDashboard() {
       />
       <EditDialog client={editClient} open={editOpen} onOpenChange={setEditOpen} onSaved={(uuid, patch, saved) => {
         const updated = saved || { ...(editClient || { uuid }), ...patch, uuid };
-        setClients((prev) => prev.map((client) => client.uuid === uuid ? { ...client, ...updated } : client));
+        updateClients((prev) => prev.map((client) => client.uuid === uuid ? { ...client, ...updated } : client));
         notifyPublicDataUpdated({
           clients: {
             upsert: [updated],
@@ -1199,7 +1285,7 @@ export default function AdminDashboard() {
         }}
       />
       <DeleteDialog client={deleteClient} open={deleteOpen} onOpenChange={setDeleteOpen} onDeleted={(uuid) => {
-        setClients((prev) => prev.filter((client) => client.uuid !== uuid));
+        updateClients((prev) => prev.filter((client) => client.uuid !== uuid));
         notifyPublicDataUpdated({ clients: { remove: [uuid] } });
       }} />
       {detailClient && <DetailDialog client={detailClient} open={detailOpen} onOpenChange={setDetailOpen} />}

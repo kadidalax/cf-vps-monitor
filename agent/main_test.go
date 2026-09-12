@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -570,7 +571,7 @@ func TestTrafficResetTrackerDetectsRebootEvenWhenOneCounterIncreases(t *testing.
 	}
 }
 
-func TestTrafficResetTrackerTreatsAnyCounterDropAsCounterReset(t *testing.T) {
+func TestTrafficResetTrackerResetsEachDirectionIndependently(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "traffic-state.json")
 	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
 
@@ -581,8 +582,8 @@ func TestTrafficResetTrackerTreatsAnyCounterDropAsCounterReset(t *testing.T) {
 
 	restarted := newTrafficResetTracker(1, "token", "wan")
 	up, down := restarted.adjustSinceBoot(700, 800, now.Add(2*time.Minute), bootedInPeriod)
-	if up != 800 || down != 12_800 {
-		t.Fatalf("monthly traffic after counter reset = %d/%d, want previous period plus current counters 800/12800", up, down)
+	if up != 700 || down != 12_800 {
+		t.Fatalf("monthly traffic after one-direction reset = %d/%d, want 700/12800 without repeating upload history", up, down)
 	}
 }
 
@@ -639,6 +640,14 @@ func TestTrafficResetTrackerDropsPreviousMonthlyPeriod(t *testing.T) {
 	}
 }
 
+func selectionForTest(counters []gnet.IOCountersStat, include, exclude string, defaultRoute []string) map[string]bool {
+	names := make([]string, 0, len(counters))
+	for _, counter := range counters {
+		names = append(names, counter.Name)
+	}
+	return selectTrafficInterfaces(names, include, exclude, defaultRoute)
+}
+
 func TestSumNetworkCountersExcludesCommonVirtualInterfacesByDefault(t *testing.T) {
 	counters := []gnet.IOCountersStat{
 		{Name: "eth0", BytesSent: 100, BytesRecv: 200},
@@ -648,9 +657,403 @@ func TestSumNetworkCountersExcludesCommonVirtualInterfacesByDefault(t *testing.T
 		{Name: "vethabc", BytesSent: 5000, BytesRecv: 6000},
 	}
 
-	up, down := sumNetworkCounters(counters, "", "")
+	up, down := sumNetworkCounters(counters, selectionForTest(counters, "", "", nil))
 	if up != 100 || down != 200 {
 		t.Fatalf("network totals = %d/%d, want physical interface totals 100/200", up, down)
+	}
+}
+
+// 隧道网卡与物理网卡承载同一份流量，同时统计会把同一份流量数两遍。
+// demo 上日均 10~184 GiB 的离谱数值即由此而来。
+func TestSumNetworkCountersExcludesTunnelInterfaces(t *testing.T) {
+	counters := []gnet.IOCountersStat{
+		{Name: "eth0", BytesSent: 1000, BytesRecv: 2000},
+		{Name: "wg0", BytesSent: 900, BytesRecv: 1900},
+		{Name: "tun0", BytesSent: 800, BytesRecv: 1800},
+		{Name: "tailscale0", BytesSent: 700, BytesRecv: 1700},
+		{Name: "warp0", BytesSent: 600, BytesRecv: 1600},
+		{Name: "zt0abcdef", BytesSent: 500, BytesRecv: 1500},
+	}
+
+	up, down := sumNetworkCounters(counters, selectionForTest(counters, "", "", nil))
+	if up != 1000 || down != 2000 {
+		t.Fatalf("network totals = %d/%d, want physical-only 1000/2000 (tunnels double-count)", up, down)
+	}
+}
+
+// 默认路由所在网卡才是商家计量的口；内网网卡上的内部流量不该计入。
+func TestSelectTrafficInterfacesPrefersDefaultRouteInterface(t *testing.T) {
+	counters := []gnet.IOCountersStat{
+		{Name: "eth0", BytesSent: 1000, BytesRecv: 2000},
+		{Name: "eth1", BytesSent: 5000, BytesRecv: 6000},
+	}
+
+	selected := selectionForTest(counters, "", "", []string{"eth0"})
+	if !selected["eth0"] || selected["eth1"] || len(selected) != 1 {
+		t.Fatalf("selected = %v, want only eth0", selected)
+	}
+
+	up, down := sumNetworkCounters(counters, selected)
+	if up != 1000 || down != 2000 {
+		t.Fatalf("network totals = %d/%d, want default-route interface totals 1000/2000", up, down)
+	}
+}
+
+// 全流量走 VPN 的机器：默认路由落在被剔除的隧道上，此时不能得到空集，
+// 必须退回物理网卡——流量终究要从物理口出去，那里仍是单份计量。
+func TestSelectTrafficInterfacesFallsBackWhenDefaultRouteIsTunnel(t *testing.T) {
+	counters := []gnet.IOCountersStat{
+		{Name: "eth0", BytesSent: 1000, BytesRecv: 2000},
+		{Name: "wg0", BytesSent: 900, BytesRecv: 1900},
+	}
+
+	selected := selectionForTest(counters, "", "", []string{"wg0"})
+	if !selected["eth0"] || selected["wg0"] || len(selected) != 1 {
+		t.Fatalf("selected = %v, want fallback to eth0 only", selected)
+	}
+}
+
+// 手动 --nic-include 必须完全压过默认路由与内置排除表，
+// 多公网口分走不同线路的机器要靠它。
+func TestSelectTrafficInterfacesHonorsManualInclude(t *testing.T) {
+	counters := []gnet.IOCountersStat{
+		{Name: "eth0", BytesSent: 1000, BytesRecv: 2000},
+		{Name: "eth1", BytesSent: 5000, BytesRecv: 6000},
+		{Name: "wg0", BytesSent: 900, BytesRecv: 1900},
+	}
+
+	selected := selectionForTest(counters, "eth*", "", []string{"eth0"})
+	if !selected["eth0"] || !selected["eth1"] || selected["wg0"] || len(selected) != 2 {
+		t.Fatalf("selected = %v, want eth0+eth1", selected)
+	}
+
+	if tunnel := selectionForTest(counters, "wg*", "", []string{"eth0"}); !tunnel["wg0"] || len(tunnel) != 1 {
+		t.Fatalf("selected = %v, want explicit include to override the built-in tunnel exclusion", tunnel)
+	}
+}
+
+func TestSelectTrafficInterfacesAppliesExcludeLast(t *testing.T) {
+	counters := []gnet.IOCountersStat{
+		{Name: "eth0", BytesSent: 1000, BytesRecv: 2000},
+		{Name: "eth1", BytesSent: 5000, BytesRecv: 6000},
+	}
+
+	if selected := selectionForTest(counters, "", "eth0", []string{"eth0"}); len(selected) != 0 {
+		t.Fatalf("selected = %v, want empty after excluding the default-route interface", selected)
+	}
+	if selected := selectionForTest(counters, "eth*", "eth1", nil); !selected["eth0"] || selected["eth1"] {
+		t.Fatalf("selected = %v, want include minus exclude", selected)
+	}
+}
+
+// 回归锁：累计流量与实时速率必须基于同一个网卡集合。
+// 两条路径若各自过滤，同一台机器上会出现「速率正常、总量翻倍」的自相矛盾。
+func TestTrafficAndRateShareTheSameInterfaceSet(t *testing.T) {
+	counters := []gnet.IOCountersStat{
+		{Name: "eth0", BytesSent: 1000, BytesRecv: 2000},
+		{Name: "eth1", BytesSent: 5000, BytesRecv: 6000},
+		{Name: "wg0", BytesSent: 900, BytesRecv: 1900},
+		{Name: "docker0", BytesSent: 300, BytesRecv: 400},
+	}
+
+	selected := selectionForTest(counters, "", "", []string{"eth0"})
+	up, down := sumNetworkCounters(counters, selected)
+	perInterface := collectPerInterfaceCounters(counters, selected)
+
+	if len(perInterface) != len(selected) {
+		t.Fatalf("per-interface set = %v, selected = %v", perInterface, selected)
+	}
+	var perUp, perDown int64
+	for name, counter := range perInterface {
+		if !selected[name] {
+			t.Fatalf("per-interface set contains %s outside the selection", name)
+		}
+		perUp += int64(counter.sent)
+		perDown += int64(counter.recv)
+	}
+	if perUp != up || perDown != down {
+		t.Fatalf("rate basis %d/%d != traffic basis %d/%d", perUp, perDown, up, down)
+	}
+}
+
+func TestParseIPv4DefaultRouteInterfaces(t *testing.T) {
+	data := "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n" +
+		"eth0\t00000000\t0102030A\t0003\t0\t0\t0\t00000000\t0\t0\t0\n" +
+		"eth0\t0002030A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n" +
+		"wg0\t00000000\t00000000\t0001\t0\t0\t50\t00000000\t0\t0\t0\n"
+
+	names := parseIPv4DefaultRouteInterfaces(data)
+	if len(names) != 2 || names[0] != "eth0" || names[1] != "wg0" {
+		t.Fatalf("default route interfaces = %v, want [eth0 wg0]", names)
+	}
+}
+
+func TestParseIPv6DefaultRouteInterfaces(t *testing.T) {
+	data := "00000000000000000000000000000000 00 00000000000000000000000000000000 00 " +
+		"fe800000000000000000000000000001 00000400 00000000 00000000 00000003 eth0\n" +
+		"20010db8000000000000000000000000 40 00000000000000000000000000000000 00 " +
+		"00000000000000000000000000000000 00000100 00000000 00000000 00000001 eth0\n" +
+		"00000000000000000000000000000000 00 00000000000000000000000000000000 00 " +
+		"00000000000000000000000000000000 ffffffff 00000001 00000000 00200200 lo\n"
+
+	names := parseIPv6DefaultRouteInterfaces(data)
+	if len(names) != 1 || names[0] != "eth0" {
+		t.Fatalf("default route interfaces = %v, want [eth0] (lo must be dropped)", names)
+	}
+}
+
+func TestProcDefaultRouteInterfacesReadsBothFamilies(t *testing.T) {
+	root := t.TempDir()
+	netDir := filepath.Join(root, "net")
+	if err := os.MkdirAll(netDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	ipv4 := "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n" +
+		"eth0\t00000000\t0102030A\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
+	ipv6 := "00000000000000000000000000000000 00 00000000000000000000000000000000 00 " +
+		"fe800000000000000000000000000001 00000400 00000000 00000000 00000003 ens3\n"
+	if err := os.WriteFile(filepath.Join(netDir, "route"), []byte(ipv4), 0o644); err != nil {
+		t.Fatalf("write route: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(netDir, "ipv6_route"), []byte(ipv6), 0o644); err != nil {
+		t.Fatalf("write ipv6_route: %v", err)
+	}
+
+	names := procDefaultRouteInterfaces(root)
+	if len(names) != 2 || names[0] != "eth0" || names[1] != "ens3" {
+		t.Fatalf("default route interfaces = %v, want [eth0 ens3]", names)
+	}
+}
+
+func TestProcDefaultRouteInterfacesMissingFilesIsEmpty(t *testing.T) {
+	if names := procDefaultRouteInterfaces(t.TempDir()); len(names) != 0 {
+		t.Fatalf("default route interfaces = %v, want empty", names)
+	}
+}
+
+// ===== 负载可信度判定 =====
+//
+// test2-LXC 实测：1 核 LXC 容器上报负载 9.29，而 /proc/loadavg 的任务总数是 9500，
+// 容器里只有 17 个进程——那个负载是宿主机的。lxcfs 挂了但没开 lxcfs.loadavg=1。
+
+func TestLoadAverageTrustworthy(t *testing.T) {
+	cases := []struct {
+		name           string
+		taskTotal      int
+		visibleThreads int
+		inContainer    bool
+		want           bool
+	}{
+		{"物理机一律信任", 9500, 60, false, true},
+		{"LXC 透传宿主机（实测数量级）", 9482, 60, true, false},
+		{"容器内 lxcfs 已虚拟化", 55, 40, true, true},
+		{"容器内多线程应用不算穿透", 500, 500, true, true},
+		{"差额小于绝对门限不判穿透", 125, 30, true, true},
+		{"读不到任务总数时按可信处理", 0, 60, true, true},
+		{"数不到线程时按可信处理", 9482, 0, true, true},
+	}
+	for _, tc := range cases {
+		if got := loadAverageTrustworthy(tc.taskTotal, tc.visibleThreads, tc.inContainer); got != tc.want {
+			t.Fatalf("%s: loadAverageTrustworthy(%d, %d, %v) = %v, want %v",
+				tc.name, tc.taskTotal, tc.visibleThreads, tc.inContainer, got, tc.want)
+		}
+	}
+}
+
+func TestParseLoadAverageTaskTotal(t *testing.T) {
+	cases := map[string]int{
+		"9.71 10.09 10.90 3/9482 3197878": 9482,
+		"0.00 0.01 0.05 1/122 4242":       122,
+		"0.00 0.01 0.05":                  0,
+		"0.00 0.01 0.05 broken 4242":      0,
+		"":                                0,
+	}
+	for input, want := range cases {
+		if got := parseLoadAverageTaskTotal(input); got != want {
+			t.Fatalf("parseLoadAverageTaskTotal(%q) = %d, want %d", input, got, want)
+		}
+	}
+}
+
+func TestContainerRuntimeName(t *testing.T) {
+	t.Run("systemd container 标记", func(t *testing.T) {
+		root := t.TempDir()
+		writeFileTree(t, root, map[string]string{"run/systemd/container": "lxc\n"})
+		if got := containerRuntimeName(root); got != "lxc" {
+			t.Fatalf("containerRuntimeName = %q, want lxc", got)
+		}
+	})
+	t.Run("docker 标记文件", func(t *testing.T) {
+		root := t.TempDir()
+		writeFileTree(t, root, map[string]string{".dockerenv": ""})
+		if got := containerRuntimeName(root); got != "docker" {
+			t.Fatalf("containerRuntimeName = %q, want docker", got)
+		}
+	})
+	t.Run("lxcfs 挂载", func(t *testing.T) {
+		root := t.TempDir()
+		writeFileTree(t, root, map[string]string{
+			"proc/mounts": "lxcfs /proc/loadavg fuse.lxcfs rw,nosuid,nodev,relatime 0 0\n",
+		})
+		if got := containerRuntimeName(root); got != "lxc" {
+			t.Fatalf("containerRuntimeName = %q, want lxc", got)
+		}
+	})
+	t.Run("物理机没有任何标记", func(t *testing.T) {
+		root := t.TempDir()
+		writeFileTree(t, root, map[string]string{
+			"proc/mounts":   "/dev/vda1 / ext4 rw,relatime 0 0\n",
+			"proc/1/cgroup": "0::/init.scope\n",
+		})
+		if got := containerRuntimeName(root); got != "" {
+			t.Fatalf("containerRuntimeName = %q, want empty", got)
+		}
+	})
+}
+
+func TestCountVisibleThreads(t *testing.T) {
+	root := t.TempDir()
+	writeFileTree(t, root, map[string]string{
+		"1/task/1/status":    "",
+		"1/task/17/status":   "",
+		"42/task/42/status":  "",
+		"self/task/1/status": "",
+		"uptime":             "1 2",
+	})
+	if got := countVisibleThreads(root); got != 3 {
+		t.Fatalf("countVisibleThreads = %d, want 3 (非数字目录不计入)", got)
+	}
+}
+
+// 端到端复刻 test2-LXC 的现场：lxcfs 挂载 + loadavg 报 9482 个任务，
+// 而命名空间里只看得到寥寥几个线程。
+func TestEvaluateLoadAverageTrustOnHostPassthroughContainer(t *testing.T) {
+	root := t.TempDir()
+	writeFileTree(t, root, map[string]string{
+		"run/systemd/container":  "lxc\n",
+		"proc/mounts":            "lxcfs /proc/loadavg fuse.lxcfs rw 0 0\n",
+		"proc/loadavg":           "9.71 10.09 10.90 3/9482 3197878\n",
+		"proc/1/task/1/status":   "",
+		"proc/17/task/17/status": "",
+	})
+
+	trusted, detail := evaluateLoadAverageTrust(root)
+	if trusted {
+		t.Fatalf("expected host passthrough to be distrusted, detail=%q", detail)
+	}
+	if !strings.Contains(detail, "9482") {
+		t.Fatalf("detail = %q, want it to carry the observed task total", detail)
+	}
+}
+
+func TestEvaluateLoadAverageTrustOnBareMetal(t *testing.T) {
+	root := t.TempDir()
+	writeFileTree(t, root, map[string]string{
+		"proc/mounts":  "/dev/vda1 / ext4 rw,relatime 0 0\n",
+		"proc/loadavg": "9.71 10.09 10.90 3/9482 3197878\n",
+	})
+
+	trusted, _ := evaluateLoadAverageTrust(root)
+	if !trusted {
+		t.Fatal("bare metal must always trust /proc/loadavg (物理机零回归)")
+	}
+}
+
+// 线路契约：不可信时序列化成 null，而不是 0。0 会被读成「空闲」，比错值更误导。
+func TestReportSerializesUnavailableLoadAsNull(t *testing.T) {
+	unavailable, err := json.Marshal(Report{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(unavailable), `"load":null`) {
+		t.Fatalf("payload = %s, want \"load\":null", unavailable)
+	}
+
+	value := 1.25
+	available, err := json.Marshal(Report{Load: &value})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(available), `"load":1.25`) {
+		t.Fatalf("payload = %s, want \"load\":1.25", available)
+	}
+}
+
+func writeFileTree(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+	for name, content := range files {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+}
+
+// 回归锁（扫源码）：采集点必须把同一个网卡集合同时喂给累计流量和实时速率。
+
+// 纯逻辑测试挡不住这个回归——两个函数各自都对，只要调用点分别过滤一次，
+// 就会重新出现「速率按一套网卡算、总量按另一套算」的自相矛盾，而所有单元测试仍全绿。
+// 上一批修网速尖刺时只改了速率那条路径，总量仍走标量汇总，正是这个坑。
+func TestTrafficAndRateCallSitesUseOneSelection(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+
+	secondArg := func(fn string) string {
+		pattern := regexp.MustCompile(`\b` + fn + `\(`)
+		for _, line := range strings.Split(string(source), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "func ") {
+				continue
+			}
+			loc := pattern.FindStringIndex(trimmed)
+			if loc == nil {
+				continue
+			}
+			// 手工扫到配对的右括号并按顶层逗号切分，避免嵌套调用把参数切错。
+			depth := 0
+			args := []string{""}
+			for _, char := range trimmed[loc[1]-1:] {
+				switch char {
+				case '(':
+					depth++
+					if depth == 1 {
+						continue
+					}
+				case ')':
+					depth--
+					if depth == 0 {
+						goto done
+					}
+				case ',':
+					if depth == 1 {
+						args = append(args, "")
+						continue
+					}
+				}
+				args[len(args)-1] += string(char)
+			}
+		done:
+			if len(args) < 2 {
+				t.Fatalf("%s called with %d args at %q", fn, len(args), trimmed)
+			}
+			return strings.TrimSpace(args[1])
+		}
+		t.Fatalf("no call site found for %s", fn)
+		return ""
+	}
+
+	trafficArg := secondArg("sumNetworkCounters")
+	rateArg := secondArg("collectPerInterfaceCounters")
+	if trafficArg != rateArg {
+		t.Fatalf("traffic uses %q while rate uses %q; both must consume one selection", trafficArg, rateArg)
+	}
+	if trafficArg == "nicInclude" || trafficArg == "nicExclude" {
+		t.Fatalf("call sites re-filter from %q instead of a shared selection", trafficArg)
 	}
 }
 
@@ -1023,5 +1426,231 @@ func TestNormalizeTCPTargetAddress(t *testing.T) {
 	}
 	if address != "[2606:4700:4700::1111]:443" || host != "2606:4700:4700::1111" || port != "443" {
 		t.Fatalf("normalizeTCPTargetAddress(ipv6) = %q %q %q", address, host, port)
+	}
+}
+
+// 速率必须按接口独立基线计算：汇总标量做差会在接口集合变化时
+// 把新网卡的历史累计流量误算成一个采样周期内的增量（线上表现为几百 MB/s）。
+func TestNetworkDeltaIgnoresNewlyAppearedInterface(t *testing.T) {
+	previous := map[string]interfaceCounters{
+		"eth0": {sent: 1_000, recv: 2_000},
+	}
+	// wg0 是新出现的隧道接口，已累计 30GB 历史流量
+	current := map[string]interfaceCounters{
+		"eth0": {sent: 1_500, recv: 2_400},
+		"wg0":  {sent: 30 << 30, recv: 30 << 30},
+	}
+
+	up, down := networkDelta(previous, current)
+	if up != 500 {
+		t.Fatalf("up delta = %d, want 500 (只应计 eth0 的增量)", up)
+	}
+	if down != 400 {
+		t.Fatalf("down delta = %d, want 400 (只应计 eth0 的增量)", down)
+	}
+}
+
+// 新接口在下一轮就应正常参与统计（只有出现的那一轮计 0）。
+func TestNetworkDeltaCountsInterfaceFromSecondSample(t *testing.T) {
+	previous := map[string]interfaceCounters{
+		"eth0": {sent: 1_500, recv: 2_400},
+		"wg0":  {sent: 30 << 30, recv: 30 << 30},
+	}
+	current := map[string]interfaceCounters{
+		"eth0": {sent: 1_600, recv: 2_500},
+		"wg0":  {sent: (30 << 30) + 700, recv: (30 << 30) + 800},
+	}
+
+	up, down := networkDelta(previous, current)
+	if up != 800 {
+		t.Fatalf("up delta = %d, want 800 (eth0 100 + wg0 700)", up)
+	}
+	if down != 900 {
+		t.Fatalf("down delta = %d, want 900 (eth0 100 + wg0 800)", down)
+	}
+}
+
+// 单个接口计数器重置时只重建该接口基线，不影响同轮其他接口。
+func TestNetworkDeltaHandlesPerInterfaceReset(t *testing.T) {
+	previous := map[string]interfaceCounters{
+		"eth0": {sent: 5_000, recv: 5_000},
+		"eth1": {sent: 9_000, recv: 9_000},
+	}
+	// eth1 计数器被重置（新值小于旧值），eth0 正常增长
+	current := map[string]interfaceCounters{
+		"eth0": {sent: 5_300, recv: 5_200},
+		"eth1": {sent: 10, recv: 20},
+	}
+
+	up, down := networkDelta(previous, current)
+	if up != 300 {
+		t.Fatalf("up delta = %d, want 300 (eth1 重置应计 0，不应拖累 eth0)", up)
+	}
+	if down != 200 {
+		t.Fatalf("down delta = %d, want 200", down)
+	}
+}
+
+// 接口消失不应产生负增量。
+func TestNetworkDeltaHandlesDisappearedInterface(t *testing.T) {
+	previous := map[string]interfaceCounters{
+		"eth0": {sent: 1_000, recv: 1_000},
+		"tun0": {sent: 8_000, recv: 8_000},
+	}
+	current := map[string]interfaceCounters{
+		"eth0": {sent: 1_200, recv: 1_100},
+	}
+
+	up, down := networkDelta(previous, current)
+	if up != 200 || down != 100 {
+		t.Fatalf("delta = (%d, %d), want (200, 100)", up, down)
+	}
+}
+
+// 空输入不应 panic，也不应产生增量。
+func TestNetworkDeltaEmptyInputs(t *testing.T) {
+	if up, down := networkDelta(nil, nil); up != 0 || down != 0 {
+		t.Fatalf("nil/nil delta = (%d, %d), want (0, 0)", up, down)
+	}
+	if up, down := networkDelta(map[string]interfaceCounters{}, map[string]interfaceCounters{
+		"eth0": {sent: 5, recv: 5},
+	}); up != 0 || down != 0 {
+		t.Fatalf("首轮 delta = (%d, %d), want (0, 0)", up, down)
+	}
+}
+
+// 端到端：接口集合变化时，prepareReportForInterval 不应报出荒谬速率。
+func TestPrepareReportDoesNotSpikeOnInterfaceAppearance(t *testing.T) {
+	p := &reportPreparer{}
+
+	first := Report{
+		Timestamp:       1_000_000,
+		hasRawNetTotals: true,
+		rawNetTotalUp:   1_000,
+		rawNetTotalDown: 1_000,
+		netPerInterface: map[string]interfaceCounters{
+			"eth0": {sent: 1_000, recv: 1_000},
+		},
+	}
+	p.prepareReportForInterval(first, 120)
+
+	// 120 秒后 wg0 出现，带着 30GB 历史累计
+	second := Report{
+		Timestamp:       1_120_000,
+		hasRawNetTotals: true,
+		rawNetTotalUp:   1_000 + 1_200 + (30 << 30),
+		rawNetTotalDown: 1_000 + 2_400 + (30 << 30),
+		netPerInterface: map[string]interfaceCounters{
+			"eth0": {sent: 1_000 + 1_200, recv: 1_000 + 2_400},
+			"wg0":  {sent: 30 << 30, recv: 30 << 30},
+		},
+	}
+	out := p.prepareReportForInterval(second, 120)
+
+	if out.NetOut != 10 {
+		t.Fatalf("NetOut = %d, want 10 (1200 字节 / 120 秒)", out.NetOut)
+	}
+	if out.NetIn != 20 {
+		t.Fatalf("NetIn = %d, want 20 (2400 字节 / 120 秒)", out.NetIn)
+	}
+}
+
+// ===== 后台下发的流量重置日 =====
+
+func TestApplyTrafficResetDayPolicy(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "traffic-state.json")
+	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
+
+	oldDay, oldTracker := trafficResetDay, trafficTracker
+	defer func() { trafficResetDay, trafficTracker = oldDay, oldTracker }()
+
+	trafficResetDay = 1
+	trafficTracker = newTrafficResetTracker(1, "token", "scope")
+
+	day := func(v int) *int { return &v }
+
+	// 后台没有这个节点的记录 → 字段缺席 → 保留安装时指定的值
+	trafficResetDay = 15
+	trafficTracker = newTrafficResetTracker(15, "token", "scope")
+	applyTrafficResetDayPolicy(agentPolicy{Type: "policy"})
+	if trafficResetDay != 15 {
+		t.Fatalf("reset day = %d, want 15 (policy 缺字段时不得改动本地取值)", trafficResetDay)
+	}
+
+	// 后台下发 → 覆盖本地取值（优先级 policy > flag > env > 默认）
+	applyTrafficResetDayPolicy(agentPolicy{Type: "policy", TrafficResetDay: day(5)})
+	if trafficResetDay != 5 {
+		t.Fatalf("reset day = %d, want 5", trafficResetDay)
+	}
+	if got := trafficTracker.resetDay; got != 5 {
+		t.Fatalf("tracker reset day = %d, want 5", got)
+	}
+
+	// 非法值忽略而不是钳到边界：钳成 1 会把用户配置悄悄改掉
+	for _, invalid := range []int{0, -3, 32, 999} {
+		applyTrafficResetDayPolicy(agentPolicy{Type: "policy", TrafficResetDay: day(invalid)})
+		if trafficResetDay != 5 {
+			t.Fatalf("invalid policy day %d changed reset day to %d", invalid, trafficResetDay)
+		}
+	}
+}
+
+// 改重置日必须让当期累计重新起算——周期定义变了，旧累计无法换算。
+// 后台表单上的提示语就是基于这个行为，行为若变了提示语就成了假话。
+func TestChangingResetDayRestartsPeriod(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "traffic-state.json")
+	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
+
+	tracker := newTrafficResetTracker(1, "token", "scope")
+	now := time.Date(2026, time.August, 20, 12, 0, 0, 0, time.UTC)
+	booted := time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC)
+	tracker.adjustSinceBoot(1_000, 2_000, now, booted)
+	up, down := tracker.adjustSinceBoot(5_000, 6_000, now.Add(time.Minute), booted)
+	if up != 5_000 || down != 6_000 {
+		t.Fatalf("period totals = %d/%d, want 5000/6000", up, down)
+	}
+
+	if !tracker.setResetDay(15) {
+		t.Fatal("setResetDay(15) 应报告发生了变化")
+	}
+	up, down = tracker.adjustSinceBoot(5_100, 6_100, now.Add(2*time.Minute), booted)
+	if up >= 5_000 || down >= 6_000 {
+		t.Fatalf("period totals = %d/%d, want a restarted period well below the old totals", up, down)
+	}
+
+	if tracker.setResetDay(15) {
+		t.Fatal("重复设置同一个值不应报告变化")
+	}
+}
+
+// 统计口径的版本必须进 scope 哈希。
+// scope 是 traffic-state.json 里判定「旧基线是否还有效」的唯一依据：口径变了而 scope 没变，
+// 升级后 raw 骤降会被 adjust 当成计数器回绕，把整块计数再加一遍到当期累计上。
+func TestTrafficCounterScopeIncludesBasisVersion(t *testing.T) {
+	legacy := shortHash(strings.TrimSpace(nicInclude) + "\n" + strings.TrimSpace(nicExclude))
+	if trafficCounterScope() == legacy {
+		t.Fatal("trafficCounterScope 不得退回「只哈希 include/exclude」的旧公式——" +
+			"内置排除表或默认路由收敛逻辑变更时它必须跟着变")
+	}
+}
+
+// 口径变更后必须走重建分支，而不是把旧基线的负 delta 当成计数器回绕。
+// 这条锁的是真实升级路径：旧 agent 把 eth0 与隧道一起算，新 agent 只算默认路由网卡，
+// raw 因此骤降；开机时间落在本期内（rawCoversPeriod 为真）是会触发虚增的那条分支。
+func TestCounterBasisChangeRebaselinesInsteadOfInflating(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "traffic-state.json")
+	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
+
+	now := time.Date(2026, time.August, 20, 12, 0, 0, 0, time.UTC)
+	booted := time.Date(2026, time.August, 10, 0, 0, 0, 0, time.UTC)
+
+	previous := newTrafficResetTracker(1, "token", "basis-v1")
+	previous.adjustSinceBoot(20_000_000, 21_000_000, now, booted)
+
+	upgraded := newTrafficResetTracker(1, "token", "basis-v2")
+	up, down := upgraded.adjustSinceBoot(11_000_000, 11_500_000, now.Add(time.Minute), booted)
+
+	if up > 11_000_000 || down > 11_500_000 {
+		t.Fatalf("period totals = %d/%d, 口径变更后当期累计不得超过新口径的 raw 计数（这就是一次性虚增）", up, down)
 	}
 }

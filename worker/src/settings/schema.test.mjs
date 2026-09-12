@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 
 const {
+  buildAdminSettings,
   buildPublicSettings,
   normalizeSettingValue,
+  sanitizeSettingsForStorage,
 } = await import('./schema.ts');
 
 assert.equal(normalizeSettingValue('site_logo_url', '/api/site-logo?v=1').ok, true);
@@ -44,3 +46,36 @@ const publicSettings = buildPublicSettings({
 assert.equal(publicSettings.site_logo_url, '/api/site-logo?v=1');
 assert.equal('site_logo_data' in publicSettings, false);
 assert.equal('site_logo_type' in publicSettings, false);
+
+// webhook 自指：写入路径拦，读取路径不拦。
+const SELF = 'monitor.example.com';
+const SELF_URL = `https://${SELF}/api/hook`;
+
+// 不传 selfHost 时行为与改动前一致——已有调用方（读取路径）不知道自己的域名。
+assert.equal(normalizeSettingValue('webhook_url', SELF_URL).ok, true);
+// 传了就拦，且提示要说人话，不能只回通用的「类型或取值无效」。
+const selfResult = normalizeSettingValue('webhook_url', SELF_URL, SELF);
+assert.equal(selfResult.ok, false);
+assert.match(selfResult.error, /不能填本站地址/);
+// 外部地址照常通过，并被归一化
+assert.deepEqual(
+  normalizeSettingValue('webhook_url', 'https://hooks.example.com/hook', SELF),
+  { ok: true, value: 'https://hooks.example.com/hook' },
+);
+// 清空仍然允许：用户得有办法把坏值删掉
+assert.deepEqual(normalizeSettingValue('webhook_url', '', SELF), { ok: true, value: '' });
+// 非法地址仍走通用提示，不该被 self_host 的话术盖掉
+assert.match(normalizeSettingValue('webhook_url', 'http://example.com/h', SELF).error, /类型或取值无效/);
+
+// 透传到写入入口
+const rejected = sanitizeSettingsForStorage({ webhook_url: SELF_URL }, { selfHost: SELF });
+assert.equal(rejected.ok, false);
+assert.match(rejected.errors.join(' | '), /不能填本站地址/);
+assert.deepEqual(
+  sanitizeSettingsForStorage({ webhook_url: SELF_URL }).errors,
+  [],
+  '不传 selfHost 时不该拦',
+);
+
+// 读取路径绝不能拦：否则存量坏值每次读取都判无效、回落成默认值，等于静默清空用户配置。
+assert.equal(buildAdminSettings({ webhook_url: SELF_URL }).webhook_url, SELF_URL);

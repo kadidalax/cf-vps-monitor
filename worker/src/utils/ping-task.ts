@@ -93,7 +93,15 @@ function isBlockedIpv4(host: string): boolean {
 }
 
 function isBlockedIpv6(host: string): boolean {
-  const normalized = host.toLowerCase().replace(/^\[|\]$/g, '');
+  let normalized = host.toLowerCase().replace(/^\[|\]$/g, '');
+  if (!normalized.includes(':')) return false;
+  try {
+    // ICMP accepts bare IPs, unlike the URL-based TCP/HTTP paths. Normalize
+    // equivalent IPv6 spellings before checking the address boundary.
+    normalized = new URL(`http://[${normalized}]/`).hostname.slice(1, -1);
+  } catch {
+    return true;
+  }
   return (
     normalized === '::' ||
     normalized === '::1' ||
@@ -101,7 +109,7 @@ function isBlockedIpv6(host: string): boolean {
     normalized.startsWith('0:0:0:0:0:ffff:') ||
     normalized.startsWith('fc') ||
     normalized.startsWith('fd') ||
-    normalized.startsWith('fe80:')
+    /^fe[89ab][0-9a-f]:/.test(normalized)
   );
 }
 

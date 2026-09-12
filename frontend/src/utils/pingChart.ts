@@ -1,4 +1,5 @@
 import { fetchWithBootstrapRetry } from './api.ts';
+import { collectCursorHistory } from './publicHistory.ts';
 
 export interface PingTask {
   id: number | string;
@@ -325,12 +326,37 @@ export async function fetchPingTaskSeries(
     return Math.min(360, Math.max(1, limit));
   };
 
+  const rangeStart = rangeHours && rangeHours > 0
+    ? new Date(Date.parse(cursor) - rangeHours * 3600000).toISOString()
+    : null;
+  const fetchTaskPage = async (task: NormalizedPingTask, nextCursor: string) => {
+    const response = await fetch(
+      `/api/records/ping?uuid=${encodeURIComponent(uuid)}&task_id=${task.id}&limit=${requestLimitForTask(task)}&cursor=${encodeURIComponent(nextCursor)}${hiddenQuery}`,
+      { signal },
+    );
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  };
+
+  const completeBatchRange = async (series: PingTaskSeries[]): Promise<PingTaskSeries[]> => Promise.all(series.map(async (item) => {
+    if (!rangeStart || item.records.length < requestLimitForTask(item.task)) return item;
+    const oldest = Math.min(...item.records.map(record => Date.parse(record.time)));
+    if (!Number.isFinite(oldest) || oldest <= Date.parse(rangeStart)) return item;
+    const older = await collectCursorHistory(
+      (nextCursor) => fetchTaskPage(item.task, nextCursor),
+      { cursor: new Date(oldest).toISOString(), start: rangeStart, end: cursor, normalize: normalizePingRecords, signal },
+    );
+    const records = new Map([...older, ...item.records].map(record => [Date.parse(record.time), record]));
+    return { ...item, records: [...records.values()].sort((a, b) => Date.parse(a.time) - Date.parse(b.time)) };
+  }));
+
   if (tasks.length > 0) {
     const batchLimit = Math.max(...tasks.map(requestLimitForTask));
     const baseIntervalSec = Math.min(...tasks.map((task) => task.intervalSec));
     const taskSpecs = tasks
       .map((task) => `${task.id}:${requestLimitForTask(task)}:${task.intervalSec}`)
       .join(',');
+    let batchSeries: PingTaskSeries[] | null = null;
     try {
       const recordsResponse = await fetch(
         `/api/records/ping/batch?uuid=${encodeURIComponent(uuid)}&task_specs=${encodeURIComponent(taskSpecs)}&base_interval=${baseIntervalSec}&limit=${batchLimit}&cursor=${encodeURIComponent(cursor)}${hiddenQuery}`,
@@ -338,34 +364,24 @@ export async function fetchPingTaskSeries(
       );
       if (recordsResponse.ok) {
         const recordsByTask = await recordsResponse.json();
-        const series = tasks.map((task) => ({
+        batchSeries = tasks.map((task) => ({
           task,
           records: normalizePingRecords(asRecord(recordsByTask)?.[String(task.id)]),
         }));
-        return limitPingSeriesToRecentRange(series, rangeHours);
       }
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw error;
       // Fall back to the legacy per-task endpoint below.
     }
+    if (batchSeries) return limitPingSeriesToRecentRange(await completeBatchRange(batchSeries), rangeHours);
   }
 
   const series = await Promise.all(
     tasks.map(async (task) => {
-      try {
-        const requestLimit = requestLimitForTask(task);
-        const recordsResponse = await fetch(
-          `/api/records/ping?uuid=${encodeURIComponent(uuid)}&task_id=${task.id}&limit=${requestLimit}&cursor=${encodeURIComponent(cursor)}${hiddenQuery}`,
-          { signal },
-        );
-        if (!recordsResponse.ok) return { task, records: [] };
-        const records = await recordsResponse.json();
-        return {
-          task,
-          records: normalizePingRecords(records),
-        };
-      } catch {
-        return { task, records: [] };
-      }
+      const records = rangeStart
+        ? await collectCursorHistory((nextCursor) => fetchTaskPage(task, nextCursor), { cursor, start: rangeStart, end: cursor, normalize: normalizePingRecords, signal })
+        : normalizePingRecords(await fetchTaskPage(task, cursor));
+      return { task, records };
     }),
   );
 

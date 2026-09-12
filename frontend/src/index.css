@@ -627,6 +627,11 @@ body {
   overflow: hidden;
 }
 
+.node-card::before {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
 .node-card .rt-CardInner {
   padding: 7px !important;
   height: 100%;
@@ -1155,7 +1160,9 @@ body {
 .node-network-summary-row {
   min-width: 0;
   display: grid;
-  grid-template-columns: 70px minmax(0, 1fr);
+  /* 标签列自适应内容宽度：写死数值要么放不下标签（nowrap 会溢出），
+     要么白占宽度让数值被截断。max-content 取「刚好放下」，余量全给数值。 */
+  grid-template-columns: max-content minmax(0, 1fr);
   align-items: center;
   gap: 6px;
 }
@@ -1186,11 +1193,11 @@ body {
   min-width: 0;
   min-height: 26px;
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   justify-content: center;
-  gap: 4px;
-  padding: 2px 5px;
+  gap: 3px;
+  padding: 2px 4px;
   border-radius: 6px;
   background: color-mix(in srgb, var(--monitor-panel-strong) 62%, transparent);
   font-family: var(--font-mono);
@@ -1223,13 +1230,6 @@ body {
   grid-template-columns: minmax(0, 1fr);
   justify-content: center;
   color: var(--gray-12);
-}
-
-.node-network-direction {
-  color: var(--monitor-muted-text);
-  font-family: var(--font-sans);
-  font-size: 11px;
-  font-weight: 700;
 }
 
 .node-network-value.is-up {
@@ -3498,6 +3498,7 @@ html[data-monitor-theme='aurora'] .nav-logo-mark {
   min-width: 0;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
   align-items: start;
   column-gap: 7px;
   row-gap: 0;
@@ -3510,6 +3511,8 @@ html[data-monitor-theme='aurora'] .nav-logo-mark {
   justify-content: flex-start;
   gap: 3px;
   width: 24px;
+  grid-column: 1;
+  grid-row: 1 / span 2;
   align-self: start;
   padding-top: 0;
   transform: translateY(-4px);
@@ -3526,13 +3529,16 @@ html[data-monitor-theme='aurora'] .nav-logo-mark {
   display: block;
   text-align: left;
   cursor: pointer;
+  grid-column: 2;
+  grid-row: 1;
   transform: translateY(-4px);
 }
 
 .admin-node-card-name-row {
   min-width: 0;
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr);
+  /* 27px = Flag size=20 的实际宽度（20 × 4/3），配合左对齐让国旗左边缘与徽章行对齐 */
+  grid-template-columns: 27px minmax(0, 1fr);
   align-items: center;
   gap: 6px;
 }
@@ -3540,17 +3546,8 @@ html[data-monitor-theme='aurora'] .nav-logo-mark {
 .admin-node-card-flag {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   flex: 0 0 auto;
-}
-
-.admin-node-card-title-copy {
-  min-width: 0;
-  width: 100%;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  gap: 0;
 }
 
 .admin-node-card-badges {
@@ -3560,9 +3557,36 @@ html[data-monitor-theme='aurora'] .nav-logo-mark {
   gap: 4px;
   flex-wrap: nowrap;
   overflow: hidden;
+  /* 跨到操作按钮列下方，长地名可用整卡宽度；按钮在第一行，不会被遮挡 */
+  grid-column: 2 / span 2;
+  grid-row: 2;
   padding-left: 0;
   padding-right: 2px;
-  margin-top: -1px;
+  /* 「在线」已改为纯文字（无底色），文字左边缘就是它的视觉左边缘，
+     因此不再需要为 Badge 内边距做补偿位移：这里保持 0，
+     文字自然落在国旗左边缘上，也正是原先绿底卡片所在的位置。 */
+  margin-left: 0;
+  /* 上移 3px 收紧与名称行的间距，但不足以顶到按钮行（实测按钮底 20px、徽章顶 21px），
+     避免与操作按钮产生垂直重叠 */
+  margin-top: -3px;
+}
+
+/* 在线 / 离线状态：只保留文字，去掉原来的绿色底卡片。
+   没有底色就没有内边距，文字左边缘 = 容器左边缘 = 国旗左边缘。 */
+.admin-node-status-text {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.admin-node-status-text.is-online {
+  color: var(--green-11);
+}
+
+.admin-node-status-text.is-offline {
+  color: var(--gray-11);
 }
 
 .admin-node-card-badges .rt-Badge {
@@ -3719,6 +3743,8 @@ html[data-monitor-theme='aurora'] .nav-logo-mark {
 }
 
 .admin-node-card-header .admin-row-actions {
+  grid-column: 3;
+  grid-row: 1;
   transform: translateY(-4px);
 }
 
@@ -5339,10 +5365,6 @@ html[data-monitor-theme='aurora'] .nav-logo-mark {
     padding: 3px 4px;
   }
 
-  .node-network-direction {
-    display: none;
-  }
-
   .instance-detail-panel {
     width: 100%;
   }
@@ -5596,7 +5618,7 @@ html[data-monitor-theme='aurora'] .nav-logo-mark {
   }
 
   .node-network-summary-row {
-    grid-template-columns: 68px minmax(0, 1fr);
+    grid-template-columns: max-content minmax(0, 1fr);
     align-items: center;
     gap: 4px;
   }
@@ -6238,3 +6260,16 @@ html[data-monitor-theme='aurora'] .nav-logo-mark {
   border-radius: 8px;
   background: var(--gray-a2);
 }
+
+/* Keyboard-operable native controls retain the existing table/card appearance. */
+.setting-card-toggle { display: flex; width: 100%; align-items: center; justify-content: space-between; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.node-table-sort-button { display: flex; align-items: center; gap: 4px; min-height: 28px; padding: 4px 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
+.setting-card-toggle:focus-visible, .node-table-sort-button:focus-visible { outline: 2px solid var(--accent-9); outline-offset: 3px; border-radius: 3px; }
+
+
+.capacity-resources { min-width: 0; margin: 16px 0; }
+.capacity-resource-table { width: 100%; min-width: 680px; border-collapse: collapse; font-size: 12px; }
+.capacity-resource-table th, .capacity-resource-table td { padding: 8px; border-bottom: 1px solid var(--gray-5); text-align: left; vertical-align: top; }
+.capacity-resource-table details { font-weight: normal; max-width: 240px; }
+.capacity-resource-table summary { cursor: pointer; color: var(--gray-11); }
+.capacity-resource-table ul { margin: 4px 0; padding-left: 16px; }

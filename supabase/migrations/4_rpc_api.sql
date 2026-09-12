@@ -1,6 +1,20 @@
 -- Source: 20260622010000_add_worker_data_api_phase1_rpc.sql
 set local search_path = public;
 
+-- ⚠️ 本文件里「新增列」的 DDL 必须排在任何引用该列的函数定义之前。
+-- language sql 的函数体在 CREATE 时就做完整语义校验，列不存在会当场报 42703；
+-- 存量库走的正是这条路径（全新库由 1_core_schema.sql 建列，本地怎么试都不复现）。
+-- 每月流量重置日：节点级配置，经 agent policy 下发。被 cfm_admin_clients 与
+-- cfm_create_client（均为 language sql）引用，故必须留在这里，不能放进下方 DDL 块。
+alter table clients add column if not exists traffic_reset_day smallint not null default 1;
+alter table clients drop constraint if exists clients_traffic_reset_day_check;
+alter table clients add constraint clients_traffic_reset_day_check check (traffic_reset_day between 1 and 31);
+
+-- A dedicated generation identifies the configuration actually probed. Older
+-- history stays unversioned; it must not masquerade as the current generation.
+alter table website_monitors add column if not exists config_revision uuid not null default gen_random_uuid();
+alter table website_checks add column if not exists config_revision uuid;
+
 -- Phase 1 Worker Data API RPC. These functions are called only by the Worker
 -- with Supabase service_role; browsers still talk only to the Worker.
 
@@ -13,6 +27,22 @@ as $$
   select coalesce(jsonb_object_agg(key, value), '{}'::jsonb)
   from settings;
 $$;
+
+create or replace function public.cfm_settings_by_keys(input_keys text[])
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  select coalesce(jsonb_object_agg(key, value), '{}'::jsonb)
+  from settings
+  where key = any(coalesce(input_keys, array[]::text[]));
+$$;
+
+revoke all on function public.cfm_settings_by_keys(text[]) from public;
+revoke all on function public.cfm_settings_by_keys(text[]) from anon;
+revoke all on function public.cfm_settings_by_keys(text[]) from authenticated;
+grant execute on function public.cfm_settings_by_keys(text[]) to service_role;
 
 create or replace function public.cfm_set_settings(input_settings jsonb)
 returns void
@@ -65,7 +95,7 @@ as $$
       kernel_version, gpu_name, ipv4, ipv6, region, remark, public_remark,
       mem_total, swap_total, disk_total, version, price, billing_cycle,
       auto_renewal, currency, expired_at, "group", tags, hidden,
-      traffic_limit, traffic_limit_type, sort_order, created_at, updated_at
+      traffic_limit, traffic_limit_type, traffic_reset_day, sort_order, created_at, updated_at
     from clients
     order by sort_order asc, lower(name) asc, created_at asc
   ) row_data;
@@ -253,14 +283,19 @@ returns jsonb
 language sql
 set search_path = public
 as $$
-  insert into clients (uuid, token, token_hash, token_rotated_at, name, sort_order)
+  insert into clients (
+    uuid, token, token_hash, token_rotated_at, name, sort_order,
+    traffic_limit_type, traffic_reset_day
+  )
   values (
     coalesce(nullif(input_client->>'uuid', ''), gen_random_uuid()::text),
     input_client->>'token',
     input_client->>'token_hash',
     now(),
     coalesce(input_client->>'name', ''),
-    coalesce((input_client->>'sort_order')::integer, (select coalesce(max(sort_order), 0) + 1 from clients))
+    coalesce((input_client->>'sort_order')::integer, (select coalesce(max(sort_order), 0) + 1 from clients)),
+    coalesce(nullif(input_client->>'traffic_limit_type', ''), 'sum'),
+    least(greatest(coalesce((input_client->>'traffic_reset_day')::smallint, 1), 1), 31)
   )
   returning to_jsonb(clients);
 $$;
@@ -359,7 +394,10 @@ begin
     tags = case when input_patch ? 'tags' then coalesce(input_patch->>'tags', '') else tags end,
     hidden = case when input_patch ? 'hidden' then case when lower(coalesce(input_patch->>'hidden', '')) in ('true', '1') then 1 else 0 end else hidden end,
     traffic_limit = case when input_patch ? 'traffic_limit' then coalesce((input_patch->>'traffic_limit')::bigint, 0) else traffic_limit end,
-    traffic_limit_type = case when input_patch ? 'traffic_limit_type' then coalesce(input_patch->>'traffic_limit_type', 'max') else traffic_limit_type end,
+    traffic_limit_type = case when input_patch ? 'traffic_limit_type' then coalesce(input_patch->>'traffic_limit_type', 'sum') else traffic_limit_type end,
+    traffic_reset_day = case when input_patch ? 'traffic_reset_day'
+      then least(greatest(coalesce((input_patch->>'traffic_reset_day')::smallint, 1), 1), 31)
+      else traffic_reset_day end,
     sort_order = case when input_patch ? 'sort_order' then coalesce((input_patch->>'sort_order')::integer, 0) else sort_order end,
     updated_at = now()
   where uuid = input_uuid
@@ -904,7 +942,10 @@ begin
   return jsonb_build_object(
     'records', records_deleted,
     'gpu_records', gpu_records_deleted,
-    'gpu_snapshots', gpu_snapshots_deleted
+    'gpu_snapshots', gpu_snapshots_deleted,
+    'has_more', exists(select 1 from records where time < input_before_time::timestamptz)
+      or exists(select 1 from gpu_records where time < input_before_time::timestamptz)
+      or exists(select 1 from gpu_snapshots where time < input_before_time::timestamptz)
   );
 end;
 $$;
@@ -925,7 +966,8 @@ begin
   )
   select count(*)::integer into website_checks_deleted from deleted;
 
-  return jsonb_build_object('website_checks', website_checks_deleted);
+  return jsonb_build_object('website_checks', website_checks_deleted,
+    'has_more', exists(select 1 from website_checks where checked_at < input_before_time::timestamptz));
 end;
 $$;
 
@@ -955,7 +997,9 @@ begin
 
   return jsonb_build_object(
     'ping_records', ping_records_deleted,
-    'ping_snapshots', ping_snapshots_deleted
+    'ping_snapshots', ping_snapshots_deleted,
+    'has_more', exists(select 1 from ping_records where time < input_before_time::timestamptz)
+      or exists(select 1 from ping_snapshots where time < input_before_time::timestamptz)
   );
 end;
 $$;
@@ -976,7 +1020,8 @@ begin
   )
   select count(*)::integer into audit_logs_deleted from deleted;
 
-  return jsonb_build_object('audit_logs', audit_logs_deleted);
+  return jsonb_build_object('audit_logs', audit_logs_deleted,
+    'has_more', exists(select 1 from audit_logs where time < input_before_time::timestamptz));
 end;
 $$;
 
@@ -1017,7 +1062,8 @@ as $$
     select distinct on (client)
       client,
       case when lower(coalesce(item->>'enable', 'false')) in ('true', '1') then 1 else 0 end as enable,
-      coalesce(nullif(item->>'grace_period', '')::integer, 180) as grace_period,
+      -- 与前端 DEFAULT_GRACE_PERIOD_SEC 及列默认值一致（360）。
+      coalesce(nullif(item->>'grace_period', '')::integer, 360) as grace_period,
       ord
     from jsonb_array_elements(coalesce(input_items, '[]'::jsonb)) with ordinality as value(item, ord)
     cross join lateral (select trim(item->>'client') as client) normalized
@@ -1043,14 +1089,24 @@ as $$
   select count(*)::integer from upserted;
 $$;
 
-create or replace function public.cfm_mark_offline_notification_sent(input_client text, input_time text)
-returns void
-language sql
+drop function if exists public.cfm_mark_offline_notification_sent(text, text);
+create or replace function public.cfm_mark_offline_notification_sent(input_client text, input_time text, input_token text default null)
+returns boolean
+language plpgsql
 set search_path = public
 as $$
-  update offline_notifications
-  set last_notified = nullif(input_time, '')::timestamptz
-  where client = input_client;
+begin
+  -- Keep the same owner -> rule -> ledger lock order as claim and restore.
+  perform 1 from clients where uuid = input_client for update;
+  if not found then return false; end if;
+  perform 1 from offline_notifications where client = input_client and enable <> 0 for update;
+  if not found then return false; end if;
+  if not cfm_internal.notification_delivery_token_matches('offline:' || input_client, input_token) then
+    return false;
+  end if;
+  update offline_notifications set last_notified = nullif(input_time, '')::timestamptz where client = input_client;
+  return true;
+end;
 $$;
 
 create or replace function public.cfm_expiry_notification(input_client text)
@@ -1111,14 +1167,24 @@ as $$
   select count(*)::integer from upserted;
 $$;
 
-create or replace function public.cfm_mark_expiry_notification_sent(input_client text, input_time text)
-returns void
-language sql
+drop function if exists public.cfm_mark_expiry_notification_sent(text, text);
+create or replace function public.cfm_mark_expiry_notification_sent(input_client text, input_time text, input_token text default null)
+returns boolean
+language plpgsql
 set search_path = public
 as $$
-  update expiry_notifications
-  set last_notified = input_time::timestamptz
-  where client = input_client;
+begin
+  -- Keep the same owner -> rule -> ledger lock order as claim and restore.
+  perform 1 from clients where uuid = input_client for update;
+  if not found then return false; end if;
+  perform 1 from expiry_notifications where client = input_client and enable <> 0 for update;
+  if not found then return false; end if;
+  if not cfm_internal.notification_delivery_token_matches('expiry:' || input_client, input_token) then
+    return false;
+  end if;
+  update expiry_notifications set last_notified = nullif(input_time, '')::timestamptz where client = input_client;
+  return true;
+end;
 $$;
 
 create or replace function public.cfm_audit_logs_paged(input_page integer default 1, input_limit integer default 50)
@@ -1358,15 +1424,19 @@ as $$
       records.client,
       case
         when input_metric = 'ram' then case when ram_total > 0 then (ram::double precision / ram_total) * 100 else 0 end
-        when input_metric = 'load' then coalesce(load, 0)
+        when input_metric = 'load' then load
         when input_metric = 'disk' then case when disk_total > 0 then (disk::double precision / disk_total) * 100 else 0 end
-        when input_metric = 'temp' then coalesce(temp, 0)
+        when input_metric = 'temp' then temp
         else coalesce(cpu, 0)
       end as metric_value
     from records
     join ids on ids.client = records.client
     where records.time >= input_start::timestamptz
       and records.time <= input_end::timestamptz
+      -- 负载不可用的采样点直接排除：既不计入 samples，也不拉低均值。
+      -- 若当成 0 参与统计，节点看起来「一直不超阈值」，与「没有数据」是两回事。
+      and (input_metric <> 'load' or records.load is not null)
+      and (input_metric <> 'temp' or records.temp is not null)
   )
   select coalesce(jsonb_agg(to_jsonb(row_data) order by client), '[]'::jsonb)
   from (
@@ -1439,6 +1509,49 @@ begin
   );
 end;
 $$;
+
+-- 每月流量重置日的建列 DDL 已提到文件顶部（被 language sql 的函数体引用，必须更早执行）。
+-- 以下两个默认值此前靠应用层补丁绕开迁移，本批一并正规化（只影响新建行，存量配置不动）。
+alter table clients alter column traffic_limit_type set default 'sum';
+alter table offline_notifications alter column grace_period set default 360;
+
+-- 负载「不可用」用 null 表示：lxcfs 未虚拟化 loadavg 的容器读到的是宿主机负载，
+-- 报 0 会被读成空闲。存量库的 records.load 建成了 not null default 0，这里幂等放开。
+alter table records alter column load drop not null;
+alter table records alter column load drop default;
+-- Missing sensors are unavailable, while measured zero remains a valid value.
+-- Historical zeroes have unknown provenance and must not be rewritten.
+alter table records alter column temp drop not null;
+alter table records alter column temp drop default;
+
+-- 行数熔断降级为次要边界后，旧默认值 450000 会先于 400 MiB 的字节熔断跳闸，
+-- 使「按真实字节量熔断」的改造失效。把仍停留在旧默认值的库抬到 700000。
+-- 只动 450000 这个确切值：用户手工调过的阈值是有意为之，不能覆盖。
+-- （1_core_schema.sql 的 seed 是 on conflict do nothing，只对全新库生效，够不到存量库。）
+update settings set value = '700000'
+where key = 'record_high_watermark_rows' and value = '450000';
+
+-- Preserve the one-time eligibility decision before adding probe controls. An
+-- existing off/false can be an explicit administrator choice, so only a schema
+-- that never had either control proves the old rows still need conversion.
+create schema if not exists cfm_internal;
+create table if not exists cfm_internal.data_migrations (
+  version text primary key,
+  pending_website_ids bigint[] not null default '{}',
+  completed_at timestamptz
+);
+alter table cfm_internal.data_migrations enable row level security;
+revoke all on table cfm_internal.data_migrations from public, anon, authenticated, service_role;
+
+insert into cfm_internal.data_migrations(version, pending_website_ids)
+select '20260701010000_agent_website_primary_fallback',
+  case when not exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'website_monitors'
+      and column_name in ('agent_probe_mode', 'agent_probe_status_enabled')
+  ) then coalesce((select array_agg(id) from website_monitors where enabled), '{}'::bigint[])
+  else '{}'::bigint[] end
+on conflict (version) do nothing;
 
 alter table website_monitors add column if not exists agent_probe_mode text not null default 'off';
 alter table website_monitors add column if not exists agent_probe_clients jsonb not null default '[]'::jsonb;
@@ -1563,7 +1676,7 @@ as $$
       least(greatest(coalesce(input_limit, 20), 1), 50) as safe_limit
   ),
   selected as (
-    select id, name, url, method, expected_status_min, expected_status_max, interval_sec,
+    select id, config_revision, name, url, method, expected_status_min, expected_status_max, interval_sec,
       timeout_sec, grace_period_sec, enabled, hidden, agent_probe_mode, agent_probe_clients,
       agent_probe_limit, agent_probe_status_enabled, sort_order, status, last_checked_at,
       last_success_at, last_failure_at, last_status_code, last_raw_status_code, last_latency_ms,
@@ -1579,7 +1692,7 @@ as $$
   ),
   country_candidates as (
     select
-      wm.id, wm.name, wm.url, wm.method, wm.expected_status_min, wm.expected_status_max, wm.interval_sec,
+      wm.id, wm.config_revision, wm.name, wm.url, wm.method, wm.expected_status_min, wm.expected_status_max, wm.interval_sec,
       wm.timeout_sec, wm.grace_period_sec, wm.enabled, wm.hidden, wm.agent_probe_mode, wm.agent_probe_clients,
       wm.agent_probe_limit, wm.agent_probe_status_enabled, wm.sort_order, wm.status, wm.last_checked_at,
       wm.last_success_at, wm.last_failure_at, wm.last_status_code, wm.last_raw_status_code, wm.last_latency_ms,
@@ -1599,7 +1712,7 @@ as $$
       and wm.agent_probe_mode = 'country_auto'
   ),
   country_selected as (
-    select id, name, url, method, expected_status_min, expected_status_max, interval_sec,
+    select id, config_revision, name, url, method, expected_status_min, expected_status_max, interval_sec,
       timeout_sec, grace_period_sec, enabled, hidden, agent_probe_mode, agent_probe_clients,
       agent_probe_limit, agent_probe_status_enabled, sort_order, status, last_checked_at,
       last_success_at, last_failure_at, last_status_code, last_raw_status_code, last_latency_ms,
@@ -1623,7 +1736,10 @@ as $$
   ) row_data;
 $$;
 
-create or replace function public.cfm_mark_website_monitor_notified(input_id integer, input_time text)
+drop function if exists public.cfm_mark_website_monitor_notified(integer, text);
+create or replace function public.cfm_mark_website_monitor_notified(
+  input_id integer, input_time text, input_expected jsonb default null
+)
 returns boolean
 language sql
 set search_path = public
@@ -1633,6 +1749,13 @@ as $$
     set last_notified_at = nullif(input_time, '')::timestamptz,
         updated_at = now()
     where id = input_id
+      and enabled = true
+      and jsonb_typeof(input_expected) = 'object'
+      and input_expected ?& array['config_revision', 'status', 'down_since', 'last_notified_at']
+      and config_revision::text = input_expected->>'config_revision'
+      and status = input_expected->>'status'
+      and down_since is not distinct from (input_expected->>'down_since')::timestamptz
+      and last_notified_at is not distinct from (input_expected->>'last_notified_at')::timestamptz
     returning id
   )
   select exists(select 1 from updated);
@@ -1661,8 +1784,15 @@ begin
     coalesce((input_record->>'ram_total')::double precision, 0),
     coalesce((input_record->>'swap')::double precision, 0),
     coalesce((input_record->>'swap_total')::double precision, 0),
-    coalesce((input_record->>'load')::double precision, 0),
-    coalesce((input_record->>'temp')::double precision, 0),
+    -- load 的兼容语义区分「显式 null」与「字段缺失」：
+    -- 显式 null（容器内 loadavg 透传宿主机）落库为 null；老探针不带该字段仍按 0。
+    -- 这里若照抄其它字段的 coalesce(..., 0)，null 会在写入时被悄悄补成 0，
+    -- 可空列、告警 RPC 的 is not null 过滤、前端解析就全都读不到「不可用」。
+    case
+      when jsonb_typeof(input_record->'load') = 'null' then null
+      else coalesce((input_record->>'load')::double precision, 0)
+    end,
+    (input_record->>'temp')::double precision,
     coalesce((input_record->>'disk')::double precision, 0),
     coalesce((input_record->>'disk_total')::double precision, 0),
     coalesce((input_record->>'net_in')::double precision, 0),
@@ -1714,8 +1844,10 @@ begin
     return;
   end if;
 
-  insert into ping_snapshots (client, time, values_json)
-  values (input_client, input_time::timestamptz, values_json);
+  insert into ping_snapshots (client, time, values_json, batch_hash)
+  values (input_client, input_time::timestamptz, values_json,
+    encode(sha256(convert_to(values_json::text, 'UTF8')), 'hex'))
+  on conflict (client, time, batch_hash) where batch_hash is not null do nothing;
 end;
 $$;
 
@@ -1894,14 +2026,19 @@ begin
       from numbered, params
       where not ((select count(*) from raw_rows) > params.limit_value and rn = 1)
     )
+  -- jsonb_strip_nulls 只能作用在标量字段上：它是**递归**的，套在整个响应外面会连
+  -- data 数组里 load 为 null 的键一起删掉，而前端把「键不存在」当作 0，
+  -- 「负载不可用」就被读成「空闲」。先剥标量字段的 null，再合并未经剥离的 data。
+  -- （gpu / ping 的同款游标 RPC 没有可空列，那两处保持原样。）
   select jsonb_strip_nulls(jsonb_build_object(
-    'data', coalesce((select jsonb_agg(to_jsonb(data_rows) order by time asc) from data_rows), '[]'::jsonb),
     'total', (select count(*) from data_rows) + case when (select count(*) from raw_rows) > params.limit_value then 1 else 0 end,
     'page', 1,
     'limit', params.limit_value,
     'has_more', (select count(*) from raw_rows) > params.limit_value,
     'next_cursor', case when (select count(*) from raw_rows) > params.limit_value then (select min(time) from data_rows) else null end
-  ))
+  )) || jsonb_build_object(
+    'data', coalesce((select jsonb_agg(to_jsonb(data_rows) order by time asc) from data_rows), '[]'::jsonb)
+  )
   from params
   );
 end;
@@ -2298,6 +2435,74 @@ as $$
     'ping_snapshots', (select count(*) from ping_snapshots)
   );
 $$;
+
+-- 历史表的真实磁盘占用（含索引与 TOAST）。
+-- 熔断必须按字节量：Supabase 卡的是磁盘字节，而同样行数可能对应 72MB 也可能 189MB，
+-- 数行数还完全不含索引开销，熔断点落不到真正快满的地方。
+create or replace function public.cfm_history_storage_bytes()
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  select jsonb_build_object(
+    'records', pg_total_relation_size('public.records'),
+    'gpu_records', pg_total_relation_size('public.gpu_records'),
+    'gpu_snapshots', pg_total_relation_size('public.gpu_snapshots'),
+    'ping_records', pg_total_relation_size('public.ping_records'),
+    'ping_snapshots', pg_total_relation_size('public.ping_snapshots'),
+    'total', pg_total_relation_size('public.records')
+      + pg_total_relation_size('public.gpu_records')
+      + pg_total_relation_size('public.gpu_snapshots')
+      + pg_total_relation_size('public.ping_records')
+      + pg_total_relation_size('public.ping_snapshots')
+  );
+$$;
+
+-- Live tuple size is measured; index/page overhead is a planning allowance, not
+-- a claim of exact physical usage or reusable space. DELETE immediately removes
+-- visible rows while PostgreSQL can keep the allocated files for later reuse.
+create or replace function public.cfm_history_storage_usage()
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  with table_usage as (
+    select 'records' as table_name, count(*)::bigint as live_rows,
+      coalesce(sum(pg_column_size(row_data)), 0)::bigint as live_row_bytes,
+      pg_total_relation_size('public.records') as allocated_bytes from records row_data
+    union all
+    select 'gpu_records', count(*)::bigint, coalesce(sum(pg_column_size(row_data)), 0)::bigint,
+      pg_total_relation_size('public.gpu_records') from gpu_records row_data
+    union all
+    select 'gpu_snapshots', count(*)::bigint, coalesce(sum(pg_column_size(row_data)), 0)::bigint,
+      pg_total_relation_size('public.gpu_snapshots') from gpu_snapshots row_data
+    union all
+    select 'ping_records', count(*)::bigint, coalesce(sum(pg_column_size(row_data)), 0)::bigint,
+      pg_total_relation_size('public.ping_records') from ping_records row_data
+    union all
+    select 'ping_snapshots', count(*)::bigint, coalesce(sum(pg_column_size(row_data)), 0)::bigint,
+      pg_total_relation_size('public.ping_snapshots') from ping_snapshots row_data
+  )
+  select jsonb_build_object(
+    'live_rows', sum(live_rows),
+    'live_row_bytes', sum(live_row_bytes),
+    'estimated_live_storage_bytes', sum(live_row_bytes + live_rows * 192),
+    'allocated_bytes', sum(allocated_bytes),
+    'reusable_bytes', null,
+    'measurement', 'live-row-bytes-plus-index-estimate',
+    'index_page_allowance_bytes_per_row', 192,
+    'tables', jsonb_object_agg(table_name, jsonb_build_object(
+      'live_rows', live_rows, 'live_row_bytes', live_row_bytes,
+      'estimated_live_storage_bytes', live_row_bytes + live_rows * 192,
+      'allocated_bytes', allocated_bytes
+    ))
+  ) from table_usage;
+$$;
+
+revoke all on function public.cfm_history_storage_usage() from public, anon, authenticated;
+grant execute on function public.cfm_history_storage_usage() to service_role;
 
 create or replace function public.cfm_storage_row_counts()
 returns jsonb
@@ -3015,10 +3220,10 @@ revoke all on function public.cfm_set_offline_notifications(jsonb) from anon;
 revoke all on function public.cfm_set_offline_notifications(jsonb) from authenticated;
 grant execute on function public.cfm_set_offline_notifications(jsonb) to service_role;
 
-revoke all on function public.cfm_mark_offline_notification_sent(text, text) from public;
-revoke all on function public.cfm_mark_offline_notification_sent(text, text) from anon;
-revoke all on function public.cfm_mark_offline_notification_sent(text, text) from authenticated;
-grant execute on function public.cfm_mark_offline_notification_sent(text, text) to service_role;
+revoke all on function public.cfm_mark_offline_notification_sent(text, text, text) from public;
+revoke all on function public.cfm_mark_offline_notification_sent(text, text, text) from anon;
+revoke all on function public.cfm_mark_offline_notification_sent(text, text, text) from authenticated;
+grant execute on function public.cfm_mark_offline_notification_sent(text, text, text) to service_role;
 
 revoke all on function public.cfm_expiry_notification(text) from public;
 revoke all on function public.cfm_expiry_notification(text) from anon;
@@ -3035,10 +3240,10 @@ revoke all on function public.cfm_set_expiry_notifications(jsonb) from anon;
 revoke all on function public.cfm_set_expiry_notifications(jsonb) from authenticated;
 grant execute on function public.cfm_set_expiry_notifications(jsonb) to service_role;
 
-revoke all on function public.cfm_mark_expiry_notification_sent(text, text) from public;
-revoke all on function public.cfm_mark_expiry_notification_sent(text, text) from anon;
-revoke all on function public.cfm_mark_expiry_notification_sent(text, text) from authenticated;
-grant execute on function public.cfm_mark_expiry_notification_sent(text, text) to service_role;
+revoke all on function public.cfm_mark_expiry_notification_sent(text, text, text) from public;
+revoke all on function public.cfm_mark_expiry_notification_sent(text, text, text) from anon;
+revoke all on function public.cfm_mark_expiry_notification_sent(text, text, text) from authenticated;
+grant execute on function public.cfm_mark_expiry_notification_sent(text, text, text) to service_role;
 
 revoke all on function public.cfm_audit_logs_paged(integer, integer) from public;
 revoke all on function public.cfm_audit_logs_paged(integer, integer) from anon;
@@ -3120,10 +3325,10 @@ revoke all on function public.cfm_agent_website_probe_tasks(text, text, integer)
 revoke all on function public.cfm_agent_website_probe_tasks(text, text, integer) from authenticated;
 grant execute on function public.cfm_agent_website_probe_tasks(text, text, integer) to service_role;
 
-revoke all on function public.cfm_mark_website_monitor_notified(integer, text) from public;
-revoke all on function public.cfm_mark_website_monitor_notified(integer, text) from anon;
-revoke all on function public.cfm_mark_website_monitor_notified(integer, text) from authenticated;
-grant execute on function public.cfm_mark_website_monitor_notified(integer, text) to service_role;
+revoke all on function public.cfm_mark_website_monitor_notified(integer, text, jsonb) from public;
+revoke all on function public.cfm_mark_website_monitor_notified(integer, text, jsonb) from anon;
+revoke all on function public.cfm_mark_website_monitor_notified(integer, text, jsonb) from authenticated;
+grant execute on function public.cfm_mark_website_monitor_notified(integer, text, jsonb) to service_role;
 
 revoke all on function public.cfm_insert_monitor_record(jsonb) from public;
 revoke all on function public.cfm_insert_monitor_record(jsonb) from anon;
@@ -3215,6 +3420,10 @@ revoke all on function public.cfm_ping_records_for_tasks(text, jsonb, integer, t
 revoke all on function public.cfm_ping_records_for_tasks(text, jsonb, integer, text) from authenticated;
 grant execute on function public.cfm_ping_records_for_tasks(text, jsonb, integer, text) to service_role;
 
+revoke all on function public.cfm_history_storage_bytes() from public;
+revoke all on function public.cfm_history_storage_bytes() from anon;
+revoke all on function public.cfm_history_storage_bytes() from authenticated;
+grant execute on function public.cfm_history_storage_bytes() to service_role;
 revoke all on function public.cfm_history_storage_counts() from public;
 revoke all on function public.cfm_history_storage_counts() from anon;
 revoke all on function public.cfm_history_storage_counts() from authenticated;
@@ -3367,6 +3576,36 @@ begin
 end;
 $$;
 
+-- Initial creation is deliberately separate from password recovery. A stale
+-- HTTP count=0 cannot authorize replacing a user created by another request.
+create or replace function public.cfm_create_initial_admin(p_uuid text, p_username text, p_password_hash text)
+returns boolean
+language plpgsql
+set search_path = public
+as $$
+begin
+  if nullif(trim(coalesce(p_uuid, '')), '') is null
+    or nullif(trim(coalesce(p_username, '')), '') is null
+    or coalesce(p_password_hash, '') = ''
+  then
+    raise exception 'user uuid, username, and password hash are required';
+  end if;
+
+  lock table public.users in share row exclusive mode;
+  if exists (select 1 from public.users) then
+    return false;
+  end if;
+  insert into public.users (uuid, username, passwd, password_changed_at)
+  values (p_uuid, p_username, p_password_hash, now());
+  return true;
+end;
+$$;
+
+revoke all on function public.cfm_create_initial_admin(text, text, text) from public;
+revoke all on function public.cfm_create_initial_admin(text, text, text) from anon;
+revoke all on function public.cfm_create_initial_admin(text, text, text) from authenticated;
+grant execute on function public.cfm_create_initial_admin(text, text, text) to service_role;
+
 create or replace function public.cfm_delete_user_if_matches(input_uuid text, input_username text, input_passwd text)
 returns boolean
 language plpgsql
@@ -3392,7 +3631,7 @@ set search_path = public
 as $$
   select to_jsonb(row_data)
   from (
-    select bucket, failures, first_failed_at, last_failed_at, locked_until
+    select bucket, failures, first_failed_at, last_failed_at, locked_until, failure_revision
     from login_rate_limits
     where bucket = input_bucket
     limit 1
@@ -3437,7 +3676,8 @@ begin
     failures = excluded.failures,
     first_failed_at = excluded.first_failed_at,
     last_failed_at = excluded.last_failed_at,
-    locked_until = excluded.locked_until;
+    locked_until = excluded.locked_until,
+    failure_revision = gen_random_uuid();
 end;
 $$;
 
@@ -3472,6 +3712,73 @@ as $$
     where trim(value) <> ''
   );
 $$;
+
+-- Derive increments from the current row inside a single RPC transaction. Sorted
+-- buckets give overlapping multi-bucket requests a consistent row-lock order.
+create or replace function public.cfm_record_login_failures(input_buckets jsonb, input_failed_at text)
+returns void
+language plpgsql
+security invoker
+set search_path = public
+as $$
+declare
+  bucket_name text;
+  failed_at timestamptz := input_failed_at::timestamptz;
+  saved public.login_rate_limits%rowtype;
+  next_lock timestamptz;
+begin
+  if failed_at is null then
+    raise exception 'failure time is required';
+  end if;
+  for bucket_name in
+    select distinct value
+    from jsonb_array_elements_text(case when jsonb_typeof(input_buckets) = 'array' then input_buckets else '[]'::jsonb end)
+    where trim(value) <> ''
+    order by value
+  loop
+    insert into public.login_rate_limits as limits
+      (bucket, failures, first_failed_at, last_failed_at, locked_until)
+    values (bucket_name, 1, failed_at, failed_at, null)
+    on conflict (bucket) do update set
+      failures = case
+        when greatest(excluded.last_failed_at, limits.last_failed_at) - limits.first_failed_at <= interval '15 minutes'
+          then least(limits.failures, 2147483646) + 1
+        else 1 end,
+      first_failed_at = case
+        when greatest(excluded.last_failed_at, limits.last_failed_at) - limits.first_failed_at <= interval '15 minutes'
+          then limits.first_failed_at
+        else greatest(excluded.last_failed_at, limits.last_failed_at) end,
+      last_failed_at = greatest(excluded.last_failed_at, limits.last_failed_at),
+      failure_revision = gen_random_uuid()
+    returning * into saved;
+
+    next_lock := case when saved.failures >= 5 then
+      saved.last_failed_at + interval '1 second' * least(900, 30 * power(2, least(saved.failures - 5, 5)))
+      else null end;
+    update public.login_rate_limits
+    set locked_until = greatest(next_lock,
+      case when saved.locked_until > saved.last_failed_at then saved.locked_until else null end)
+    where bucket = bucket_name;
+  end loop;
+end;
+$$;
+
+create or replace function public.cfm_clear_observed_login_failures(input_states jsonb)
+returns void
+language sql
+security invoker
+set search_path = public
+as $$
+  delete from public.login_rate_limits as limits
+  using jsonb_array_elements(case when jsonb_typeof(input_states) = 'array' then input_states else '[]'::jsonb end) as observed(value)
+  where limits.bucket = observed.value->>'bucket'
+    and limits.failure_revision = (observed.value->>'failure_revision')::uuid;
+$$;
+
+revoke all on function public.cfm_record_login_failures(jsonb, text) from public, anon, authenticated;
+grant execute on function public.cfm_record_login_failures(jsonb, text) to service_role;
+revoke all on function public.cfm_clear_observed_login_failures(jsonb) from public, anon, authenticated;
+grant execute on function public.cfm_clear_observed_login_failures(jsonb) to service_role;
 
 create or replace function public.cfm_delete_login_rate_limits_before(input_before_time text)
 returns void
@@ -3551,6 +3858,7 @@ declare
   item jsonb;
   client_ids text[];
   task_ids bigint[];
+  website_ids bigint[];
 begin
   if input_backup is null or jsonb_typeof(input_backup) <> 'object' then
     raise exception 'backup must be a JSON object';
@@ -3592,7 +3900,7 @@ begin
         name, cpu_name, virtualization, arch, cpu_cores, os, kernel_version, gpu_name,
         ipv4, ipv6, region, remark, public_remark, mem_total, swap_total, disk_total,
         version, price, billing_cycle, auto_renewal, currency, expired_at, "group", tags,
-        hidden, traffic_limit, traffic_limit_type, sort_order, created_at, updated_at
+        hidden, traffic_limit, traffic_limit_type, traffic_reset_day, sort_order, created_at, updated_at
       )
       values (
         item->>'uuid',
@@ -3627,7 +3935,11 @@ begin
         coalesce(item->>'tags', ''),
         case when coalesce((item->>'hidden')::boolean, false) then 1 else 0 end,
         coalesce((item->>'traffic_limit')::bigint, 0),
-        coalesce(item->>'traffic_limit_type', 'max'),
+        -- 兜底值与 cfm_create_client / cfm_update_client 保持一致（'sum'）；
+        -- 还原路径漏改会让从旧备份恢复的节点静默回到 'max' 口径。
+        coalesce(nullif(item->>'traffic_limit_type', ''), 'sum'),
+        -- 缺省补 1 并钳到 1~31：列上有 check 约束，直接写 0 会让整个还原事务失败。
+        least(greatest(coalesce((item->>'traffic_reset_day')::smallint, 1), 1), 31),
         coalesce((item->>'sort_order')::integer, 0),
         coalesce(nullif(item->>'created_at', '')::timestamptz, now()),
         coalesce(nullif(item->>'updated_at', '')::timestamptz, now())
@@ -3665,8 +3977,93 @@ begin
         hidden = excluded.hidden,
         traffic_limit = excluded.traffic_limit,
         traffic_limit_type = excluded.traffic_limit_type,
+        traffic_reset_day = excluded.traffic_reset_day,
         sort_order = excluded.sort_order,
         updated_at = now();
+      perform cfm_internal.retire_client_notification_deliveries(item->>'uuid');
+    end loop;
+  end if;
+
+  if input_backup ? 'website_monitors' then
+    if jsonb_typeof(input_backup->'website_monitors') <> 'array' then
+      raise exception 'website_monitors must be an array';
+    end if;
+    if exists (
+      select 1 from jsonb_array_elements(input_backup->'website_monitors') row_data
+      where jsonb_typeof(row_data) <> 'object'
+        or (row_data ? 'id' and (coalesce(row_data->>'id', '') !~ '^[1-9][0-9]*$'
+          or (row_data->>'id')::numeric > 9007199254740991))
+    ) then
+      raise exception 'invalid website monitor identity';
+    end if;
+    if exists (
+      select (value->>'id')::bigint
+      from jsonb_array_elements(input_backup->'website_monitors')
+      where value ? 'id'
+      group by (value->>'id')::bigint having count(*) > 1
+    ) then
+      raise exception 'duplicate website monitor identity';
+    end if;
+    select coalesce(array_agg((value->>'id')::bigint), array[]::bigint[])
+      into website_ids
+    from jsonb_array_elements(input_backup->'website_monitors') where value ? 'id';
+
+    -- setval is not rolled back: never move below existing or already allocated
+    -- identities, even if a later module rejects the transaction. Serialize
+    -- writers while reserving explicit IDs ahead of entries without an ID.
+    lock table website_monitors in share row exclusive mode;
+    perform setval(pg_get_serial_sequence('website_monitors', 'id'),
+      greatest(
+        coalesce((select max(id) from website_monitors), 0) + 1,
+        coalesce((select max(id) from unnest(website_ids) as restored(id)), 0) + 1,
+        nextval(pg_get_serial_sequence('website_monitors', 'id'))
+      ), false);
+    delete from website_monitors where not (id = any(website_ids));
+
+    for item in select value from jsonb_array_elements(input_backup->'website_monitors')
+    loop
+      if item ? 'agent_probe_clients' and jsonb_typeof(item->'agent_probe_clients') <> 'array' then
+        raise exception 'website monitor agents must be an array';
+      end if;
+      if exists (
+        select 1 from jsonb_array_elements_text(coalesce(item->'agent_probe_clients', '[]'::jsonb)) as agents(uuid)
+        where not exists (select 1 from clients where clients.uuid = agents.uuid)
+      ) then
+        raise exception 'website monitor references an unknown agent';
+      end if;
+      insert into website_monitors (
+        id, name, url, method, expected_status_min, expected_status_max,
+        interval_sec, timeout_sec, grace_period_sec, enabled, hidden, hide_url,
+        agent_probe_mode, agent_probe_clients, agent_probe_limit, agent_probe_status_enabled,
+        sort_order, status
+      ) values (
+        coalesce((item->>'id')::bigint, nextval(pg_get_serial_sequence('website_monitors', 'id'))),
+        coalesce(item->>'name', ''), coalesce(item->>'url', ''), coalesce(item->>'method', 'GET'),
+        coalesce((item->>'expected_status_min')::integer, 200),
+        coalesce((item->>'expected_status_max')::integer, 399),
+        coalesce((item->>'interval_sec')::integer, 120), coalesce((item->>'timeout_sec')::integer, 10),
+        coalesce((item->>'grace_period_sec')::integer, 180), coalesce((item->>'enabled')::boolean, true),
+        coalesce((item->>'hidden')::boolean, false), coalesce((item->>'hide_url')::boolean, false),
+        coalesce(item->>'agent_probe_mode', 'off'), coalesce(item->'agent_probe_clients', '[]'::jsonb),
+        coalesce((item->>'agent_probe_limit')::integer, 3),
+        coalesce((item->>'agent_probe_status_enabled')::boolean, true),
+        coalesce((item->>'sort_order')::integer, 0),
+        case when coalesce((item->>'enabled')::boolean, true) then 'pending' else 'paused' end
+      )
+      on conflict (id) do update set
+        name = excluded.name, url = excluded.url, method = excluded.method,
+        expected_status_min = excluded.expected_status_min, expected_status_max = excluded.expected_status_max,
+        interval_sec = excluded.interval_sec, timeout_sec = excluded.timeout_sec,
+        grace_period_sec = excluded.grace_period_sec, enabled = excluded.enabled,
+        hidden = excluded.hidden, hide_url = excluded.hide_url,
+        agent_probe_mode = excluded.agent_probe_mode, agent_probe_clients = excluded.agent_probe_clients,
+        agent_probe_limit = excluded.agent_probe_limit, agent_probe_status_enabled = excluded.agent_probe_status_enabled,
+        sort_order = excluded.sort_order, status = excluded.status,
+        config_revision = excluded.config_revision,
+        last_checked_at = null, last_success_at = null, last_failure_at = null,
+        last_status_code = null, last_raw_status_code = null, last_latency_ms = null,
+        last_effective_reason = null, last_error = null, down_since = null,
+        last_notified_at = null, updated_at = now();
     end loop;
   end if;
 
@@ -3679,6 +4076,13 @@ begin
         and (value->>'id')::bigint > 0
     ) rows;
 
+    lock table ping_tasks in share row exclusive mode;
+    perform setval(pg_get_serial_sequence('ping_tasks', 'id'),
+      greatest(
+        coalesce((select max(id) from ping_tasks), 0) + 1,
+        coalesce((select max(id) from unnest(task_ids) as restored(id)), 0) + 1,
+        nextval(pg_get_serial_sequence('ping_tasks', 'id'))
+      ), false);
     if coalesce(array_length(task_ids, 1), 0) > 0 then
       delete from ping_tasks where not (id = any(task_ids));
     else
@@ -3720,8 +4124,6 @@ begin
         );
       end if;
     end loop;
-
-    perform setval(pg_get_serial_sequence('ping_tasks', 'id'), coalesce((select max(id) from ping_tasks), 0) + 1, false);
   end if;
 
   if input_backup ? 'offline_notifications' and jsonb_typeof(input_backup->'offline_notifications') = 'array' then
@@ -3749,6 +4151,15 @@ begin
   end if;
 
   if input_backup ? 'load_notifications' and jsonb_typeof(input_backup->'load_notifications') = 'array' then
+    lock table load_notifications in share row exclusive mode;
+    perform setval(pg_get_serial_sequence('load_notifications', 'id'),
+      greatest(
+        coalesce((select max(id) from load_notifications), 0) + 1,
+        coalesce((select max(case when coalesce(value->>'id', '') ~ '^[0-9]+$'
+          then (value->>'id')::bigint else 0 end)
+          from jsonb_array_elements(input_backup->'load_notifications')), 0) + 1,
+        nextval(pg_get_serial_sequence('load_notifications', 'id'))
+      ), false);
     delete from load_notifications where true;
     for item in select value from jsonb_array_elements(input_backup->'load_notifications')
     loop
@@ -3777,8 +4188,6 @@ begin
         );
       end if;
     end loop;
-
-    perform setval(pg_get_serial_sequence('load_notifications', 'id'), coalesce((select max(id) from load_notifications), 0) + 1, false);
   end if;
 end;
 $$;
@@ -3800,6 +4209,48 @@ as $$
     coalesce(input_detail, ''),
     coalesce(nullif(input_level, ''), 'info')
   );
+$$;
+
+-- 审计节流：把「读上次时间 → 判断是否过期 → 写新时间」压成一条语句。
+-- 拆成读写两步时，两个并发请求会读到同一个旧时间戳、同时判定可写，同一条错误
+-- 于是落两行审计日志——节流形同虚设。这里靠 settings 主键冲突串行化：抢到的
+-- 那一方 do update 生效并被 returning 命中，没抢到的一方 where 为假、返回零行。
+-- 时间戳用调用方传入的 input_now 而不是服务端 now()：健康事件的其它时间戳全部
+-- 由 Worker 自己的时钟生成，这里混入服务端时钟会让同一事件的两个时间戳分属两套
+-- 钟，之后的比较不可解释。
+-- 值一律写成定宽 UTC ISO-8601（与 Worker 的 Date#toISOString 同格式），因此过期
+-- 判断直接按字符串比大小即可：各字段等宽零填充且标点位置一致，字典序等于时间序。
+-- 不 cast 成 timestamptz 是有意为之——cast 遇到脏值会抛异常，而这条路径本来就只
+-- 在系统已经出错时才走，不该再引入一个新的失败点。格式不匹配的脏值一律当作已
+-- 过期放行，与 JS 版 Date.parse 解析失败即放行的行为一致。
+create or replace function public.cfm_try_claim_audit_throttle(
+  input_key text,
+  input_now timestamptz,
+  input_throttle_ms bigint
+)
+returns boolean
+language plpgsql
+set search_path = public
+as $$
+declare
+  claimed boolean;
+begin
+  insert into settings (key, value)
+  values (input_key, to_char(input_now at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+  on conflict (key) do update
+    set value = excluded.value
+    where case
+      when settings.value !~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$' then true
+      else settings.value collate "C" <= to_char(
+        (input_now - make_interval(secs => input_throttle_ms / 1000.0)) at time zone 'UTC',
+        'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+      )
+    end
+  returning true into claimed;
+
+  -- where 为假时一行都不返回，claimed 会被置为 null，那代表「没抢到」。
+  return coalesce(claimed, false);
+end;
 $$;
 
 revoke all on function public.cfm_create_user(text, text, text) from public;
@@ -3862,6 +4313,11 @@ revoke all on function public.cfm_insert_audit_log(text, text, text, text) from 
 revoke all on function public.cfm_insert_audit_log(text, text, text, text) from authenticated;
 grant execute on function public.cfm_insert_audit_log(text, text, text, text) to service_role;
 
+revoke all on function public.cfm_try_claim_audit_throttle(text, timestamptz, bigint) from public;
+revoke all on function public.cfm_try_claim_audit_throttle(text, timestamptz, bigint) from anon;
+revoke all on function public.cfm_try_claim_audit_throttle(text, timestamptz, bigint) from authenticated;
+grant execute on function public.cfm_try_claim_audit_throttle(text, timestamptz, bigint) to service_role;
+
 notify pgrst, 'reload schema';
 
 -- -----------------------------------------------------------------------------
@@ -3910,13 +4366,26 @@ set local search_path = public;
 alter table website_monitors alter column agent_probe_mode set default 'country_auto';
 alter table website_monitors alter column agent_probe_status_enabled set default true;
 
-update website_monitors
-set agent_probe_mode = 'country_auto',
-    agent_probe_status_enabled = true,
-    updated_at = now()
-where enabled = true
-  and agent_probe_mode = 'off'
-  and agent_probe_status_enabled = false;
+do $$
+begin
+  update website_monitors wm
+  set agent_probe_mode = 'country_auto',
+      agent_probe_status_enabled = true,
+      updated_at = now()
+  from cfm_internal.data_migrations migration
+  where migration.version = '20260701010000_agent_website_primary_fallback'
+    and migration.completed_at is null
+    and wm.id = any(migration.pending_website_ids)
+    and wm.enabled = true
+    and wm.agent_probe_mode = 'off'
+    and wm.agent_probe_status_enabled = false;
+
+  update cfm_internal.data_migrations
+  set pending_website_ids = '{}', completed_at = now()
+  where version = '20260701010000_agent_website_primary_fallback'
+    and completed_at is null;
+end;
+$$;
 
 create or replace function public.cfm_due_website_monitors(input_now text, input_limit integer default 50)
 returns jsonb
@@ -3943,6 +4412,7 @@ begin
             select 1
             from website_checks recent_agent_success
             where recent_agent_success.monitor_id = wm.id
+              and recent_agent_success.config_revision = wm.config_revision
               and recent_agent_success.source_type = 'agent'
               and recent_agent_success.effective_status = 'up'
               and recent_agent_success.checked_at >= input_now::timestamptz - (greatest(wm.interval_sec + 30, wm.grace_period_sec, 180) * interval '1 second')
@@ -4190,7 +4660,7 @@ begin
       select wc.checked_at, wc.ok, wc.effective_status, wc.effective_reason,
         wc.status_code, wc.raw_status_code, wc.latency_ms, wc.source_type, wc.source_client
       from website_checks wc
-      join website_monitors wm on wm.id = wc.monitor_id
+      join website_monitors wm on wm.id = wc.monitor_id and wc.config_revision = wm.config_revision
       cross join args
       where wc.monitor_id = input_id
         and (
@@ -4199,7 +4669,7 @@ begin
           or wm.agent_probe_status_enabled = false
         )
       order by wc.checked_at desc, wc.id desc
-      limit args.safe_limit
+      limit (select safe_limit from args)
     )
   select to_jsonb(m) || jsonb_build_object(
     'checks',
@@ -4237,17 +4707,34 @@ begin
   select * into monitor_row
   from website_monitors
   where id = (input_check->>'monitor_id')::integer
-  limit 1;
+  for update;
   if not found then
     return null;
   end if;
 
+  -- Lock first: an administrator edit and a result commit must not both
+  -- succeed from the same old observation. Reject ties before history insert.
+  if not monitor_row.enabled
+    or monitor_row.config_revision::text is distinct from input_check->>'config_revision'
+    or (monitor_row.last_checked_at is not null and checked_time <= monitor_row.last_checked_at)
+    or exists (
+      select 1 from website_checks previous
+      where previous.monitor_id = monitor_row.id
+        and previous.config_revision = monitor_row.config_revision
+        and previous.source_type = source_kind
+        and previous.source_client is not distinct from source_client_id
+        and previous.checked_at >= checked_time
+    ) then
+    return null;
+  end if;
+
   insert into website_checks (
-    monitor_id, checked_at, ok, effective_status, effective_reason,
+    monitor_id, config_revision, checked_at, ok, effective_status, effective_reason,
     status_code, raw_status_code, latency_ms, error, source_type, source_client
   )
   values (
-    (input_check->>'monitor_id')::integer,
+    monitor_row.id,
+    monitor_row.config_revision,
     checked_time,
     check_ok,
     case when input_check->>'effective_status' = 'up' then 'up' else 'down' end,
@@ -4265,6 +4752,7 @@ begin
       select 1
       from website_checks recent_agent_success
       where recent_agent_success.monitor_id = monitor_row.id
+        and recent_agent_success.config_revision = monitor_row.config_revision
         and recent_agent_success.source_type = 'agent'
         and recent_agent_success.effective_status = 'up'
         and recent_agent_success.checked_at >= checked_time - (greatest(monitor_row.interval_sec + 30, monitor_row.grace_period_sec, 180) * interval '1 second')
@@ -4526,7 +5014,7 @@ as $$
           order by wc.checked_at desc, wc.id desc
         ) as rn
       from website_checks wc
-      join website_monitors wm on wm.id = wc.monitor_id
+      join website_monitors wm on wm.id = wc.monitor_id and wc.config_revision = wm.config_revision
       cross join args a
       where (input_include_hidden or wm.hidden = false)
         and wc.checked_at >= now() - (a.safe_hours * interval '1 hour')
@@ -4884,7 +5372,8 @@ as $$
     select distinct on (client)
       client,
       case when lower(coalesce(item->>'enable', 'false')) in ('true', '1') then 1 else 0 end as enable,
-      coalesce(nullif(item->>'grace_period', '')::integer, 180) as grace_period,
+      -- 与前端 DEFAULT_GRACE_PERIOD_SEC 及列默认值一致（360）。
+      coalesce(nullif(item->>'grace_period', '')::integer, 360) as grace_period,
       ord
     from jsonb_array_elements(coalesce(input_items, '[]'::jsonb)) with ordinality as value(item, ord)
     cross join lateral (select trim(item->>'client') as client) normalized
@@ -4910,14 +5399,24 @@ as $$
   select count(*)::integer from upserted;
 $$;
 
-create or replace function public.cfm_mark_offline_notification_sent(input_client text, input_time text)
-returns void
-language sql
+drop function if exists public.cfm_mark_offline_notification_sent(text, text);
+create or replace function public.cfm_mark_offline_notification_sent(input_client text, input_time text, input_token text default null)
+returns boolean
+language plpgsql
 set search_path = public
 as $$
-  update offline_notifications
-  set last_notified = nullif(input_time, '')::timestamptz
-  where client = input_client;
+begin
+  -- Keep the same owner -> rule -> ledger lock order as claim and restore.
+  perform 1 from clients where uuid = input_client for update;
+  if not found then return false; end if;
+  perform 1 from offline_notifications where client = input_client and enable <> 0 for update;
+  if not found then return false; end if;
+  if not cfm_internal.notification_delivery_token_matches('offline:' || input_client, input_token) then
+    return false;
+  end if;
+  update offline_notifications set last_notified = nullif(input_time, '')::timestamptz where client = input_client;
+  return true;
+end;
 $$;
 
 revoke all on function public.cfm_set_offline_notifications(jsonb) from public;
@@ -4925,7 +5424,434 @@ revoke all on function public.cfm_set_offline_notifications(jsonb) from anon;
 revoke all on function public.cfm_set_offline_notifications(jsonb) from authenticated;
 grant execute on function public.cfm_set_offline_notifications(jsonb) to service_role;
 
-revoke all on function public.cfm_mark_offline_notification_sent(text, text) from public;
-revoke all on function public.cfm_mark_offline_notification_sent(text, text) from anon;
-revoke all on function public.cfm_mark_offline_notification_sent(text, text) from authenticated;
-grant execute on function public.cfm_mark_offline_notification_sent(text, text) to service_role;
+revoke all on function public.cfm_mark_offline_notification_sent(text, text, text) from public;
+revoke all on function public.cfm_mark_offline_notification_sent(text, text, text) from anon;
+revoke all on function public.cfm_mark_offline_notification_sent(text, text, text) from authenticated;
+grant execute on function public.cfm_mark_offline_notification_sent(text, text, text) to service_role;
+
+-- Delivery state contains identities/timestamps only, never notification bodies
+-- or channel credentials. One row per event source/target bounds active state.
+create schema if not exists cfm_internal;
+create table if not exists cfm_internal.notification_delivery_state (
+  key text primary key check (char_length(key) between 1 and 512),
+  event_id text not null check (char_length(event_id) between 1 and 512),
+  status text not null check (status in ('pending', 'failed', 'sent')),
+  attempts integer not null default 0,
+  next_attempt_at timestamptz not null,
+  claim_token text,
+  delivered_at timestamptz,
+  updated_at timestamptz not null
+);
+alter table cfm_internal.notification_delivery_state add column if not exists retired_at timestamptz;
+alter table cfm_internal.notification_delivery_state enable row level security;
+alter table cfm_internal.notification_delivery_state force row level security;
+revoke all on table cfm_internal.notification_delivery_state from public, anon, authenticated;
+grant usage on schema cfm_internal to service_role;
+grant select, insert, update, delete on cfm_internal.notification_delivery_state to service_role;
+
+-- Unknown key formats have no inferred owner. Known formats retain the complete
+-- client ID after their structural prefix, including any additional colons.
+create or replace function cfm_internal.notification_delivery_entity_exists(input_key text, input_lock boolean default false)
+returns boolean
+language plpgsql
+set search_path = public
+as $$
+declare
+  entity_id text;
+  client_id text;
+  key_parts text[];
+begin
+  if input_key ~ '^website:[0-9]+$' then
+    entity_id := substring(input_key from 9);
+    if input_lock then
+      perform 1 from website_monitors where id::text = entity_id and enabled for share;
+    else
+      perform 1 from website_monitors where id::text = entity_id and enabled;
+    end if;
+    return found;
+  elsif input_key like 'offline:%' or input_key like 'expiry:%' then
+    client_id := substring(input_key from position(':' in input_key) + 1);
+    if client_id = '' then return null; end if;
+    if input_lock then
+      perform 1 from clients where uuid = client_id for share;
+    else
+      perform 1 from clients where uuid = client_id;
+    end if;
+    if not found then return false; end if;
+    if input_key like 'offline:%' then
+      if input_lock then
+        perform 1 from offline_notifications where client = client_id and enable <> 0 for share;
+      else
+        perform 1 from offline_notifications where client = client_id and enable <> 0;
+      end if;
+    else
+      if input_lock then
+        perform 1 from expiry_notifications where client = client_id and enable <> 0 for share;
+      else
+        perform 1 from expiry_notifications where client = client_id and enable <> 0;
+      end if;
+    end if;
+    return found;
+  elsif input_key ~ '^load:[0-9]+:.+$' then
+    key_parts := regexp_match(input_key, '^load:([0-9]+):(.+)$');
+    entity_id := key_parts[1];
+    client_id := key_parts[2];
+    if input_lock then
+      perform 1 from clients where uuid = client_id for share;
+    else
+      perform 1 from clients where uuid = client_id;
+    end if;
+    if not found then return false; end if;
+    if input_lock then
+      perform 1 from load_notifications
+      where id::text = entity_id and (clients = '[]'::jsonb or clients ? client_id) for share;
+    else
+      perform 1 from load_notifications
+      where id::text = entity_id and (clients = '[]'::jsonb or clients ? client_id);
+    end if;
+    return found;
+  end if;
+  return null;
+end;
+$$;
+
+create or replace function cfm_internal.retire_notification_deliveries(input_keys text[])
+returns void
+language plpgsql
+set search_path = public
+as $$
+declare
+  delivery_key text;
+begin
+  for delivery_key in select distinct key from unnest(input_keys) item(key) order by key
+  loop
+    -- Claims lock their owner before the ledger. Delete/replace already holds
+    -- that same owner, so a concurrently created claim cannot escape retirement.
+    update cfm_internal.notification_delivery_state
+    set retired_at = coalesce(retired_at, now())
+    where key = delivery_key;
+    delete from cfm_internal.notification_delivery_state
+    where key = delivery_key and not (
+      status = 'pending' and claim_token is not null and next_attempt_at > now()
+    );
+  end loop;
+end;
+$$;
+
+create or replace function cfm_internal.retire_client_notification_deliveries(input_client text)
+returns void
+language sql
+set search_path = public
+as $$
+  select cfm_internal.retire_notification_deliveries(coalesce(array_agg(key order by key), array[]::text[]))
+  from cfm_internal.notification_delivery_state
+  where key in ('offline:' || input_client, 'expiry:' || input_client)
+    or (key ~ '^load:[0-9]+:.+$' and substring(key from '^load:[0-9]+:(.+)$') = input_client);
+$$;
+
+revoke all on function cfm_internal.notification_delivery_entity_exists(text, boolean) from public, anon, authenticated;
+revoke all on function cfm_internal.retire_notification_deliveries(text[]) from public, anon, authenticated;
+revoke all on function cfm_internal.retire_client_notification_deliveries(text) from public, anon, authenticated;
+grant execute on function cfm_internal.notification_delivery_entity_exists(text, boolean) to service_role;
+grant execute on function cfm_internal.retire_notification_deliveries(text[]) to service_role;
+grant execute on function cfm_internal.retire_client_notification_deliveries(text) to service_role;
+
+create or replace function public.cfm_claim_notification_delivery(
+  input_key text, input_event_id text, input_now timestamptz, input_repeat_ms bigint default 0
+)
+returns jsonb
+language plpgsql
+set search_path = public
+as $$
+declare
+  current_state cfm_internal.notification_delivery_state%rowtype;
+  token text;
+begin
+  if input_now is null then raise exception 'notification delivery time is required'; end if;
+  if cfm_internal.notification_delivery_entity_exists(input_key, true) is false then
+    return jsonb_build_object('claimed', false, 'delivered', false, 'token', null);
+  end if;
+  insert into cfm_internal.notification_delivery_state
+    (key, event_id, status, attempts, next_attempt_at, updated_at)
+  values (input_key, input_event_id, 'pending', 0, input_now, input_now)
+  on conflict (key) do nothing;
+
+  select * into current_state from cfm_internal.notification_delivery_state
+  where key = input_key for update;
+  if current_state.status = 'pending' and current_state.claim_token is not null
+    and current_state.next_attempt_at > input_now then
+    return jsonb_build_object('claimed', false, 'delivered', false, 'token', null);
+  end if;
+  if current_state.retired_at is null and current_state.event_id = input_event_id then
+    if current_state.status = 'sent' and coalesce(input_repeat_ms, 0) <= 0 then
+      -- Pre-upgrade sent rows did not retain a completion credential. Create one
+      -- lazily without re-sending or changing their original delivery time.
+      token := coalesce(current_state.claim_token, gen_random_uuid()::text);
+      update cfm_internal.notification_delivery_state set claim_token = token where key = input_key;
+      return jsonb_build_object('claimed', false, 'delivered', true, 'token', token);
+    end if;
+    if current_state.next_attempt_at > input_now then
+      return jsonb_build_object('claimed', false, 'delivered', false, 'token', null);
+    end if;
+  end if;
+
+  token := gen_random_uuid()::text;
+  update cfm_internal.notification_delivery_state
+  set event_id = input_event_id, status = 'pending', claim_token = token,
+      retired_at = null, delivered_at = null,
+      attempts = case when current_state.retired_at is not null or current_state.event_id <> input_event_id or current_state.status = 'sent'
+        then 1 else least(current_state.attempts + 1, 100000) end,
+      next_attempt_at = input_now + interval '90 seconds', updated_at = input_now
+  where key = input_key;
+  return jsonb_build_object('claimed', true, 'delivered', false, 'token', token);
+end;
+$$;
+
+create or replace function public.cfm_complete_notification_delivery(
+  input_key text, input_event_id text, input_token text, input_success boolean,
+  input_now timestamptz, input_repeat_ms bigint default 0
+)
+returns boolean
+language plpgsql
+set search_path = public
+as $$
+declare
+  changed integer;
+begin
+  perform 1 from cfm_internal.notification_delivery_state
+  where key = input_key and event_id = input_event_id and claim_token = input_token and status = 'pending'
+  for update;
+  if not found then return false; end if;
+  delete from cfm_internal.notification_delivery_state
+  where key = input_key and event_id = input_event_id and claim_token = input_token
+    and status = 'pending' and retired_at is not null;
+  if found then return false; end if;
+  update cfm_internal.notification_delivery_state
+  set status = case when input_success then 'sent' else 'failed' end,
+      delivered_at = case when input_success then input_now else delivered_at end,
+      next_attempt_at = input_now + make_interval(secs => case when input_success
+        then least(greatest(coalesce(input_repeat_ms, 0), 0), 604800000) / 1000.0
+        else least(1800, 120 * power(2, least(greatest(attempts - 1, 0), 4))) end),
+      claim_token = case when input_success then input_token else null end, updated_at = input_now
+  where key = input_key and event_id = input_event_id
+    and claim_token = input_token and status = 'pending' and retired_at is null;
+  get diagnostics changed = row_count;
+  return changed = 1;
+end;
+$$;
+
+revoke all on function public.cfm_claim_notification_delivery(text, text, timestamptz, bigint) from public, anon, authenticated;
+grant execute on function public.cfm_claim_notification_delivery(text, text, timestamptz, bigint) to service_role;
+revoke all on function public.cfm_complete_notification_delivery(text, text, text, boolean, timestamptz, bigint) from public, anon, authenticated;
+grant execute on function public.cfm_complete_notification_delivery(text, text, text, boolean, timestamptz, bigint) to service_role;
+
+-- Configuration changes invalidate all in-flight work, including an A -> B -> A
+-- edit and restore of an existing ID. Health/metadata-only writes keep identity.
+create or replace function cfm_internal.rotate_website_config_revision()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if new.config_revision is distinct from old.config_revision
+    or row(new.url, new.method, new.expected_status_min, new.expected_status_max,
+      new.interval_sec, new.timeout_sec, new.grace_period_sec, new.enabled,
+      new.agent_probe_mode, new.agent_probe_clients, new.agent_probe_limit, new.agent_probe_status_enabled)
+    is distinct from row(old.url, old.method, old.expected_status_min, old.expected_status_max,
+      old.interval_sec, old.timeout_sec, old.grace_period_sec, old.enabled,
+      old.agent_probe_mode, old.agent_probe_clients, old.agent_probe_limit, old.agent_probe_status_enabled)
+  then
+    new.config_revision := gen_random_uuid();
+    new.status := case when new.enabled then 'pending' else 'paused' end;
+    new.last_checked_at := null;
+    new.last_success_at := null;
+    new.last_failure_at := null;
+    new.last_status_code := null;
+    new.last_raw_status_code := null;
+    new.last_latency_ms := null;
+    new.last_effective_reason := null;
+    new.last_error := null;
+    new.down_since := null;
+    new.last_notified_at := null;
+  end if;
+  return new;
+end;
+$$;
+revoke all on function cfm_internal.rotate_website_config_revision() from public, anon, authenticated;
+drop trigger if exists cfm_website_config_revision on public.website_monitors;
+create trigger cfm_website_config_revision before update on public.website_monitors
+for each row execute function cfm_internal.rotate_website_config_revision();
+
+create index if not exists idx_website_checks_revision_source_time
+  on public.website_checks(monitor_id, config_revision, source_type, source_client, checked_at desc);
+
+-- All configuration modules are read in the calling query's shared snapshot.
+-- Keep this STABLE and one SELECT; separate RPCs cannot provide that guarantee.
+create or replace function public.cfm_backup_configuration_snapshot()
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  select jsonb_build_object(
+    'settings', public.cfm_public_settings(),
+    'clients', public.cfm_admin_clients(),
+    'ping_tasks', public.cfm_public_ping_tasks(),
+    'offline_notifications', public.cfm_offline_notifications(),
+    'expiry_notifications', public.cfm_expiry_notifications(),
+    'load_notifications', public.cfm_load_notifications(),
+    'website_monitors', public.cfm_website_monitors()
+  );
+$$;
+revoke all on function public.cfm_backup_configuration_snapshot() from public, anon, authenticated;
+grant execute on function public.cfm_backup_configuration_snapshot() to service_role;
+
+create or replace function cfm_internal.retire_entity_notification_deliveries()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+declare
+  delivery_keys text[];
+begin
+  if tg_table_name = 'website_monitors' then
+    if tg_op = 'DELETE' or new.config_revision is distinct from old.config_revision then
+      perform cfm_internal.retire_notification_deliveries(array['website:' || old.id::text]);
+    end if;
+  elsif tg_table_name = 'clients' then
+    if tg_op = 'DELETE' then
+      perform cfm_internal.retire_client_notification_deliveries(old.uuid);
+    elsif new.expired_at is distinct from old.expired_at then
+      perform cfm_internal.retire_notification_deliveries(array['expiry:' || old.uuid]);
+    end if;
+  elsif tg_table_name = 'offline_notifications' then
+    if tg_op = 'DELETE' or row(new.enable, new.grace_period) is distinct from row(old.enable, old.grace_period) then
+      perform cfm_internal.retire_notification_deliveries(array['offline:' || old.client]);
+    end if;
+  elsif tg_table_name = 'expiry_notifications' then
+    if tg_op = 'DELETE' or row(new.enable, new.advance_days) is distinct from row(old.enable, old.advance_days) then
+      perform cfm_internal.retire_notification_deliveries(array['expiry:' || old.client]);
+    end if;
+  elsif tg_table_name = 'load_notifications' then
+    if tg_op = 'DELETE' or row(new.clients, new.metric, new.threshold, new.ratio, new.interval_min)
+      is distinct from row(old.clients, old.metric, old.threshold, old.ratio, old.interval_min) then
+      select coalesce(array_agg(key order by key), array[]::text[]) into delivery_keys
+      from cfm_internal.notification_delivery_state where key like 'load:' || old.id::text || ':%';
+      perform cfm_internal.retire_notification_deliveries(delivery_keys);
+    end if;
+  end if;
+  if tg_op = 'DELETE' then return old; end if;
+  return new;
+end;
+$$;
+revoke all on function cfm_internal.retire_entity_notification_deliveries() from public, anon, authenticated;
+
+drop trigger if exists cfm_website_delivery_retirement on public.website_monitors;
+create trigger cfm_website_delivery_retirement after delete or update on public.website_monitors
+for each row execute function cfm_internal.retire_entity_notification_deliveries();
+drop trigger if exists cfm_client_delivery_retirement on public.clients;
+create trigger cfm_client_delivery_retirement after delete or update of expired_at on public.clients
+for each row execute function cfm_internal.retire_entity_notification_deliveries();
+drop trigger if exists cfm_offline_delivery_retirement on public.offline_notifications;
+create trigger cfm_offline_delivery_retirement after delete or update on public.offline_notifications
+for each row execute function cfm_internal.retire_entity_notification_deliveries();
+drop trigger if exists cfm_expiry_delivery_retirement on public.expiry_notifications;
+create trigger cfm_expiry_delivery_retirement after delete or update on public.expiry_notifications
+for each row execute function cfm_internal.retire_entity_notification_deliveries();
+drop trigger if exists cfm_load_delivery_retirement on public.load_notifications;
+create trigger cfm_load_delivery_retirement after delete or update on public.load_notifications
+for each row execute function cfm_internal.retire_entity_notification_deliveries();
+
+create index if not exists idx_notification_delivery_retired
+  on cfm_internal.notification_delivery_state(next_attempt_at, key) where retired_at is not null;
+
+create or replace function public.cfm_cleanup_notification_delivery_state(
+  input_now timestamptz, input_batch_size integer default 1000, input_max_batches integer default 1
+)
+returns jsonb
+language plpgsql
+set search_path = public
+as $$
+declare
+  safe_batch integer := least(greatest(coalesce(input_batch_size, 1000), 1), 5000);
+  safe_batches integer := least(greatest(coalesce(input_max_batches, 1), 1), 20);
+  batch integer;
+  changed integer;
+  removed integer;
+  total_removed integer := 0;
+  remaining boolean;
+begin
+  if input_now is null then raise exception 'notification cleanup time is required'; end if;
+  for batch in 1..safe_batches loop
+    with candidates as materialized (
+      select key, status = 'pending' and claim_token is not null and next_attempt_at > input_now as active
+      from cfm_internal.notification_delivery_state
+      where (retired_at is not null and not (status = 'pending' and claim_token is not null and next_attempt_at > input_now))
+        or (retired_at is null and cfm_internal.notification_delivery_entity_exists(key, false) is false)
+      order by key
+      limit safe_batch
+      for update skip locked
+    ), retired as (
+      update cfm_internal.notification_delivery_state s
+      set retired_at = input_now
+      from candidates c where s.key = c.key and c.active and s.retired_at is null
+      returning 1
+    ), deleted as (
+      delete from cfm_internal.notification_delivery_state s
+      using candidates c where s.key = c.key and not c.active
+      returning 1
+    )
+    select (select count(*) from retired) + (select count(*) from deleted), (select count(*) from deleted)
+      into changed, removed;
+    total_removed := total_removed + removed;
+    exit when changed = 0;
+  end loop;
+  -- Waiting leases remain unfinished work for the next Cron; they are never
+  -- deleted just to make a cleanup pass appear complete.
+  select exists (
+    select 1 from cfm_internal.notification_delivery_state
+    where retired_at is not null or cfm_internal.notification_delivery_entity_exists(key, false) is false
+  ) into remaining;
+  return jsonb_build_object('notification_delivery_state', total_removed, 'has_more', remaining);
+end;
+$$;
+revoke all on function public.cfm_cleanup_notification_delivery_state(timestamptz, integer, integer) from public, anon, authenticated;
+grant execute on function public.cfm_cleanup_notification_delivery_state(timestamptz, integer, integer) to service_role;
+
+create or replace function cfm_internal.notification_delivery_token_matches(input_key text, input_token text)
+returns boolean
+language plpgsql
+set search_path = public
+as $$
+begin
+  perform 1 from cfm_internal.notification_delivery_state
+  where key = input_key and claim_token = input_token and status = 'sent' and retired_at is null
+  for update;
+  return found;
+end;
+$$;
+revoke all on function cfm_internal.notification_delivery_token_matches(text, text) from public, anon, authenticated;
+grant execute on function cfm_internal.notification_delivery_token_matches(text, text) to service_role;
+
+create or replace function public.cfm_mark_load_notification_sent(
+  input_id integer, input_client text, input_time text, input_token text
+)
+returns boolean
+language plpgsql
+set search_path = public
+as $$
+begin
+  perform 1 from clients where uuid = input_client for update;
+  if not found then return false; end if;
+  perform 1 from load_notifications
+  where id = input_id and (clients = '[]'::jsonb or clients ? input_client) for update;
+  if not found then return false; end if;
+  if not cfm_internal.notification_delivery_token_matches('load:' || input_id::text || ':' || input_client, input_token) then
+    return false;
+  end if;
+  update load_notifications set last_notified = nullif(input_time, '')::timestamptz where id = input_id;
+  return true;
+end;
+$$;
+revoke all on function public.cfm_mark_load_notification_sent(integer, text, text, text) from public, anon, authenticated;
+grant execute on function public.cfm_mark_load_notification_sent(integer, text, text, text) to service_role;
