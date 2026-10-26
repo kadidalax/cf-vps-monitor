@@ -1,4 +1,4 @@
-# 新版本v2.0 重构版完成，v1版不再维护。感谢各位一直以来的支持！
+# 新版本v2.0 重构版完成。
 
 # cf-vps-monitor
 [简体中文](https://github.com/kadidalax/cf-vps-monitor/blob/main/README.md) | [English](https://github.com/kadidalax/cf-vps-monitor/blob/main/README-EN.md)
@@ -154,7 +154,3 @@ curl -O https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/v1/cf-vps-mon
 *   **安全性:** 默认密码非常不安全 ，请务必在首次登录后修改。Agent 使用的 API 密钥也应妥善保管。
 *   **错误处理:** 如果面板或 Agent 遇到问题，可以检查 Worker 的日志（在 Cloudflare 控制面板 Worker 页面）和 Agent 的日志。
 *   以上所有内容和代码均为AI生成，出现问题请直接拿着代码找AI吧。
-
-### 诚邀赞助🤣：
-
-[![Powered by DartNode](https://dartnode.com/branding/DN-Open-Source-sm.png)](https://dartnode.com "Powered by DartNode - Free VPS for Open Source")
